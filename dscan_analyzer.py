@@ -12,6 +12,7 @@ import utils
 from global_hotkeys import register_hotkeys, start_checking_hotkeys
 import webbrowser
 from bidict import bidict
+from logger import logger
 
 
 async def get_zkill_data_async(session, char_id):
@@ -22,7 +23,7 @@ async def get_zkill_data_async(session, char_id):
             if response.status == 200:
                 return await response.json()
     except Exception as e:
-        print(f"Error fetching zkill data for {char_id}: {e}")
+        logger.log(f"Error fetching zkill data for {char_id}: {e}")
     return None
 
 
@@ -57,6 +58,7 @@ class DScanAnalyzer:
         self.result_start_time = None
         self.last_result_total_time = None
         self.name_cache = NameIdCache()
+        self.zkill_cache = {}
         cv2.namedWindow(self.win_name, cv2.WINDOW_AUTOSIZE)
         cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
         cv2.setMouseCallback(self.win_name, self.mouse_callback)
@@ -117,41 +119,91 @@ class DScanAnalyzer:
         try:
             return pyperclip.paste()
         except Exception as e:
-            print(f"Error reading clipboard: {e}")
+            logger.log(f"Error reading clipboard: {e}")
             return None
 
-    def parse_dscan(self, dscan_data):
+    async def parse_dscan(self, dscan_data):
         try:
             lines = dscan_data.strip().split('\n')
             char_names = []
+            for line in lines:
+                char_name = line.strip()
+                if char_name:
+                    char_names.append(char_name)
+            
+            data = await self.process_names_esi(char_names)
+            
+            if not data:
+                self.show_status("")
+                return
+
+            filtered_data = [
+                char_data for char_data in data if not self.should_ignore_character(char_data)]
+
+            if not filtered_data:
+                self.show_status("")
+                return
+
+            self.result_start_time = time.time()
+
+            tasks = [self.fetch_zkill_data(char_data) for char_data in filtered_data]
+            zkill_results = await asyncio.gather(*tasks)
+
+            self.last_parsed_data = filtered_data
+            self.last_zkill_results = zkill_results
+
+            im = self.create_display_image_from_processed_data(filtered_data, zkill_results)
+            if im is not None:
+                self.last_result_im = im
+                self.last_im = im
+                cv2.imshow(self.win_name, im)
+                cv2.waitKey(1)
+                self.handle_transparency()
+            
+        except Exception as e:
+            logger.log(f"Error parsing dscan: {e}")
+            return None
+
+    def parse_clipboard(self, clipboard_data):
+        try:
+            lines = clipboard_data.strip().split('\n')
             
             is_dscan = any('\t' in line for line in lines[:5])
             
-            for line in lines:
-                if is_dscan:
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        char_name = parts[1].strip()
-                        if char_name and not char_name.startswith('Jita IV'):
-                            char_names.append(char_name)
-                else:
-                    char_name = line.strip()
-                    if char_name:
-                        char_names.append(char_name)
-            
-            return asyncio.run(self.process_names_esi(char_names))
+            if is_dscan:
+                logger.log('dscan detected. not implemented yet')
+            else:
+                return asyncio.run(self.parse_dscan(clipboard_data))
         except Exception as e:
-            print(f"Error parsing dscan: {e}")
+            logger.log(f"Error parsing dscan: {e}")
             return None
 
     async def process_names_esi(self, char_names):
         try:
             result = await self.resolve_names_to_ids_esi(char_names)
             
+            # Check cache first
+            cached_results = []
+            uncached_chars = []
+            utils.tick() 
+            for char in result:
+                char_id = char['char_id']
+                if char_id in self.zkill_cache:
+                    cached_results.append(self.zkill_cache[char_id])
+                else:
+                    uncached_chars.append(char)
+            utils.tock('Cache check')
+            logger.log(f'Cached results: {len(cached_results)}') 
+            logger.log(f'Uncached chars: {len(uncached_chars)}')
+            # Only fetch uncached data if needed
+            utils.tick()
+
             connector = aiohttp.TCPConnector(limit=200)
             async with aiohttp.ClientSession(connector=connector) as session:
-                zkill_tasks = [get_zkill_data_async(session, char['char_id']) for char in result]
-                zkill_results = await asyncio.gather(*zkill_tasks)
+                zkill_tasks = [self.get_zkill_data_cached(session, char['char_id']) for char in uncached_chars]
+                uncached_results = await asyncio.gather(*zkill_tasks)
+            zkill_results = cached_results + uncached_results
+            utils.tock('zkill work')
 
             corp_ids = []
             alliance_ids = []
@@ -172,6 +224,7 @@ class DScanAnalyzer:
 
                 char_info = {
                     'char_name': char['char_name'],
+                    'char_id': char['char_id'],
                     'corp_name': id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown',
                     'alliance_name': id_to_name.get(alliance_id) if alliance_id else None,
                     'zkill_link': f"https://zkillboard.com/character/{char['char_id']}/"
@@ -180,7 +233,7 @@ class DScanAnalyzer:
 
             return char_data_list
         except Exception as e:
-            print(f"Error processing names via ESI: {e}")
+            logger.log(f"Error processing names via ESI: {e}")
             return None
 
 
@@ -201,18 +254,18 @@ class DScanAnalyzer:
             if not char_id:
                 return None
 
-            return await get_zkill_data_async(session, char_id)
+            return await self.get_zkill_data_cached(session, char_id)
         except Exception as e:
-            print(f"Error fetching zkill data for {char_name}: {e}")
+            logger.log(f"Error fetching zkill data for {char_name}: {e}")
         return None
 
     async def fetch_zkill_data(self, char_data):
         async with aiohttp.ClientSession() as session:
-            char_id = self.extract_char_id_from_link(char_data.get(
-                'zkill_link')) if char_data.get('zkill_link') else None
+            char_id = char_data.get('char_id')
             if char_id:
-                return await get_zkill_data_async(session, char_id)
+                return await self.get_zkill_data_cached(session, char_id)
             else:
+                # Need to search for char_id first, then cache by char_id
                 return await self.get_zkill_stats_async(session, char_data['char_name'])
 
     def should_ignore_character(self, char_data):
@@ -221,17 +274,25 @@ class DScanAnalyzer:
         return (corp_name in self.ignore_corps or
                 alliance_name in self.ignore_alliances)
 
-    def create_display_image(self, char_data_list, zkill_results):
+    def create_display_image_from_processed_data(self, char_data_list, zkill_results=None):
         if not char_data_list:
             return None
 
         self.char_rects = {}
         combined_data = []
-        for char_data, zkill_stats in zip(char_data_list, zkill_results):
-            danger = zkill_stats.get('dangerRatio', 0) if zkill_stats else 0
-            kills = zkill_stats.get('shipsDestroyed', 0) if zkill_stats else 0
-            losses = zkill_stats.get('shipsLost', 0) if zkill_stats else 0
-
+        
+        for i, char_data in enumerate(char_data_list):
+            zkill_data = zkill_results[i] if zkill_results and i < len(zkill_results) else None
+            
+            danger = 0
+            kills = 0
+            losses = 0
+            
+            if zkill_data:
+                danger = zkill_data.get('dangerRatio', 0)
+                kills = zkill_data.get('shipsDestroyed', 0)
+                losses = zkill_data.get('shipsLost', 0)
+            
             combined_data.append({
                 'name': char_data['char_name'],
                 'danger': danger,
@@ -284,44 +345,6 @@ class DScanAnalyzer:
 
         return im
 
-    async def print_results_async(self, data):
-        if not data:
-            self.show_status("")
-            return
-
-        filtered_data = [
-            char_data for char_data in data if not self.should_ignore_character(char_data)]
-
-        if not filtered_data:
-            self.show_status("")
-            return
-
-        self.result_start_time = time.time()
-
-        tasks = [self.fetch_zkill_data(char_data)
-                 for char_data in filtered_data]
-        zkill_results = await asyncio.gather(*tasks)
-
-        self.last_parsed_data = filtered_data
-        self.last_zkill_results = zkill_results
-
-        im = self.create_display_image(filtered_data, zkill_results)
-        if im is not None:
-            self.last_result_im = im
-            self.last_im = im
-            cv2.imshow(self.win_name, im)
-            cv2.waitKey(1)
-            self.handle_transparency()
-
-    def print_results(self, data):
-        asyncio.run(self.print_results_async(data))
-
-    def extract_char_id_from_link(self, zkill_link):
-        if not zkill_link:
-            return None
-        match = re.search(r'/character/(\d+)/', zkill_link)
-        return int(match.group(1)) if match else None
-
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             for char_name, (rect, zkill_link) in self.char_rects.items():
@@ -342,8 +365,7 @@ class DScanAnalyzer:
                     self.show_status("Working...")
 
                     utils.tick()
-                    result = self.parse_dscan(current_clipboard)
-                    self.print_results(result)
+                    self.parse_clipboard(current_clipboard)
                     self.last_result_total_time = utils.tock()
                     last_clipboard = current_clipboard
 
@@ -351,9 +373,9 @@ class DScanAnalyzer:
                     self.show_status("")
                     self.result_start_time = None
                     self.last_result_im = None
-
+                
                 if self.result_start_time and hasattr(self, 'last_parsed_data') and hasattr(self, 'last_zkill_results'):
-                    im = self.create_display_image(
+                    im = self.create_display_image_from_processed_data(
                         self.last_parsed_data, self.last_zkill_results)
                     if im is not None:
                         cv2.imshow(self.win_name, im)
@@ -372,7 +394,7 @@ class DScanAnalyzer:
         async with aiohttp.ClientSession() as session:
             async with session.post(names_url, json=char_names) as response:
                 if response.status != 200:
-                    print(f"Failed to resolve names batch: {response.status}")
+                    logger.log(f"Failed to resolve names batch: {response.status}")
                     return []
 
                 names_data = await response.json()
@@ -400,7 +422,7 @@ class DScanAnalyzer:
 
             all_results = cached_results.copy()
             chunk_size = 500
-
+            logger.log(f"Resolving {len(uncached_names)} names via ESI")
             for i in range(0, len(uncached_names), chunk_size):
                 chunk = uncached_names[i:i + chunk_size]
                 chunk_results = await self._resolve_names_batch_esi(chunk)
@@ -415,11 +437,11 @@ class DScanAnalyzer:
 
         except Exception as e:
             elapsed = time.time() - start_time
-            print(f"Error resolving names via ESI after {elapsed:.2f}s: {e}")
+            logger.log(f"Error resolving names via ESI after {elapsed:.2f}s: {e}")
             return []
         finally:
             elapsed = time.time() - start_time
-            print(f"Total ESI resolution time: {elapsed:.2f}s")
+            logger.log(f"Total ESI resolution time: {elapsed:.2f}s")
 
     async def _resolve_ids_batch_esi(self, corp_ids, alliance_ids):
         """Internal function to resolve <=1000 corp/alliance IDs to names using ESI"""
@@ -432,7 +454,7 @@ class DScanAnalyzer:
         async with aiohttp.ClientSession() as session:
             async with session.post(names_url, json=all_ids) as response:
                 if response.status != 200:
-                    print(f"Failed to resolve IDs batch: {response.status}")
+                    logger.log(f"Failed to resolve IDs batch: {response.status}")
                     return {}
 
                 names_data = await response.json()
@@ -476,85 +498,24 @@ class DScanAnalyzer:
 
         except Exception as e:
             elapsed = time.time() - start_time
-            print(f"Error resolving IDs via ESI after {elapsed:.2f}s: {e}")
+            logger.log(f"Error resolving IDs via ESI after {elapsed:.2f}s: {e}")
             return {}
         finally:
             elapsed = time.time() - start_time
-            print(f"Total ESI ID resolution time: {elapsed:.2f}s")
+            logger.log(f"Total ESI ID resolution time: {elapsed:.2f}s")
+
+    async def get_zkill_data_cached(self, session, char_id):
+        if char_id in self.zkill_cache:
+            return self.zkill_cache[char_id]
+        
+        data = await get_zkill_data_async(session, char_id)
+        self.zkill_cache[char_id] = data
+        return data
 
 
 def main():
     analyzer = DScanAnalyzer()
     analyzer.monitor_clipboard()
 
-
-def test():
-    async def run_analysis(analyzer, names, run_name):
-        print(f"=== {run_name} ===")
-        utils.tick()
-
-        result = await analyzer.resolve_names_to_ids_esi(names)
-
-        connector = aiohttp.TCPConnector(limit=200)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            zkill_tasks = [get_zkill_data_async(
-                session, char['char_id']) for char in result]
-            zkill_results = await asyncio.gather(*zkill_tasks)
-
-        corp_ids = []
-        alliance_ids = []
-        for char, zkill_data in zip(result, zkill_results):
-            if zkill_data and zkill_data.get('info'):
-                corp_id = zkill_data['info'].get('corporationID')
-                alliance_id = zkill_data['info'].get('allianceID')
-                if corp_id:
-                    corp_ids.append(corp_id)
-                if alliance_id:
-                    alliance_ids.append(alliance_id)
-
-        id_to_name = await analyzer.ids_to_names_esi(corp_ids, alliance_ids)
-
-        char_data_list = []
-        for char, zkill_data in zip(result, zkill_results):
-            corp_id = zkill_data.get('info', {}).get(
-                'corporationID') if zkill_data else None
-            alliance_id = zkill_data.get('info', {}).get(
-                'allianceID') if zkill_data else None
-
-            char_info = {
-                'char_name': char['char_name'],
-                'corp_name': id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown',
-                'alliance_name': id_to_name.get(alliance_id) if alliance_id else None,
-                'zkill_link': f"https://zkillboard.com/character/{char['char_id']}/"
-            }
-            char_data_list.append(char_info)
-
-        filtered_data = [
-            char_data for char_data in char_data_list if not analyzer.should_ignore_character(char_data)]
-        total_time = utils.tock(f'{run_name} done')
-
-        return filtered_data, zkill_results, total_time
-
-    async def test_esi():
-        analyzer = DScanAnalyzer()
-        names = pyperclip.paste().splitlines()
-
-        filtered_data, zkill_results, total_time = await run_analysis(analyzer, names, "First run")
-        await run_analysis(analyzer, names, "Second run (testing cache)")
-
-        # if filtered_data:
-        #    analyzer.result_start_time = time.time()
-        #    analyzer.last_result_total_time = total_time
-        #    im = analyzer.create_display_image(filtered_data, zkill_results)
-        #    if im is not None:
-        #        analyzer.last_result_im = im
-        #        analyzer.last_im = im
-        #        cv2.imshow(analyzer.win_name, im)
-        #        cv2.waitKey(2000)
-
-    asyncio.run(test_esi())
-
-
 if __name__ == "__main__":
     main()
-    # test()

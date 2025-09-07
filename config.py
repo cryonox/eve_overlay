@@ -34,6 +34,9 @@ def dict2attrdict(dictionary):
 
 def create_default_config(fpath):
     default_config = {
+        'logging': {
+            'enabled': True
+        },
         'dscan': {
             'enabled': True,
             'ignore_alliances': [],

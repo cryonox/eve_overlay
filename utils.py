@@ -15,6 +15,7 @@ import ctypes
 import win32print
 import time
 import math
+from logger import logger
 
 
 def tick():
@@ -25,7 +26,7 @@ def tick():
 def tock(description=''):
     dur = (time.perf_counter_ns()-timer_start)/1000/1000
     if description:
-        print(f'{description} = {dur} ms')
+        logger.log(f'{description} = {dur} ms')
         return dur
     return dur
 
