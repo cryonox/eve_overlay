@@ -42,6 +42,8 @@ def create_default_config(fpath):
             'ignore_alliances': [],
             'ignore_corps': [],
             'hotkey_transparency': 'alt+shift+f',
+            'hotkey_mode': 'alt+shift+m',
+            'hotkey_clear_cache': 'alt+shift+e',
             'transparency_on': True,
             'font_scale': 0.5,
             'font_thickness': 1,

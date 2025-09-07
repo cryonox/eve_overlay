@@ -15,16 +15,34 @@ from bidict import bidict
 from logger import logger
 
 
-async def get_zkill_data_async(session, char_id):
-    try:
-        stats_url = f"https://zkillboard.com/api/stats/characterID/{char_id}/"
-        headers = {'User-Agent': 'DScan Analyzer'}
-        async with session.get(stats_url, headers=headers, timeout=10) as response:
-            if response.status == 200:
-                return await response.json()
-    except Exception as e:
-        logger.log(f"Error fetching zkill data for {char_id}: {e}")
-    return None
+async def get_zkill_data_async(session, char_id, max_retries=3):
+    for attempt in range(max_retries + 1):
+        try:
+            stats_url = f"https://zkillboard.com/api/stats/characterID/{char_id}/"
+            headers = {'User-Agent': 'Eve Overlay'}
+            async with session.get(stats_url, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Check for zkill's "Invalid type or id" response
+                    if isinstance(data, dict) and data.get('error') == 'Invalid type or id':
+                        return {'error': 'not_found'}
+                    return data
+                elif response.status == 429 or response.status == 1015:  # Cloudflare rate limit
+                    return {'error': 'rate_limited'}
+                elif response.status == 404:
+                    return {'error': 'not_found'}
+                else:
+                    return {'error': 'api_error', 'status': response.status}
+        except Exception as e:
+            if attempt < max_retries:
+                wait_time = (2 ** attempt) * 2
+                logger.log(f"Network error for char {char_id}, retrying in {wait_time}s: {e}")
+                await asyncio.sleep(wait_time)
+                continue
+            logger.log(f"Error fetching zkill data for {char_id}: {e}")
+            return {'error': 'network_error'}
+    
+    return {'error': 'max_retries_exceeded'}
 
 
 class NameIdCache:
@@ -59,6 +77,8 @@ class DScanAnalyzer:
         self.last_result_total_time = None
         self.name_cache = NameIdCache()
         self.zkill_cache = {}
+        self.esi_char_cache = {}
+        self.ticker_cache = {}
         self.aggregated_mode = False
         self.mode_changed = False
         cv2.namedWindow(self.win_name, cv2.WINDOW_AUTOSIZE)
@@ -71,9 +91,11 @@ class DScanAnalyzer:
 
         hotkey_transparency = C.dscan.get('hotkey_transparency', 'alt+shift+f')
         hotkey_mode = C.dscan.get('hotkey_mode', 'alt+shift+m')
+        hotkey_clear_cache = C.dscan.get('hotkey_clear_cache', 'alt+shift+e')
         bindings = [
             [hotkey_transparency.split('+'), None, self.toggle_transparency],
-            [hotkey_mode.split('+'), None, self.toggle_mode]
+            [hotkey_mode.split('+'), None, self.toggle_mode],
+            [hotkey_clear_cache.split('+'), None, self.clear_cache]
         ]
         register_hotkeys(bindings)
         start_checking_hotkeys()
@@ -143,7 +165,6 @@ class DScanAnalyzer:
 
             filtered_data = [
                 char_data for char_data in data if not self.should_ignore_character(char_data)]
-
             if not filtered_data:
                 self.show_status("")
                 return
@@ -160,9 +181,13 @@ class DScanAnalyzer:
                     cv2.waitKey(1)
                     self.handle_transparency()
             else:
-                tasks = [self.fetch_zkill_data(char_data)
-                         for char_data in filtered_data]
-                zkill_results = await asyncio.gather(*tasks)
+                # Use zkill data already fetched in process_names_esi
+                zkill_results = []
+                for char_data in filtered_data:
+                    char_id = char_data.get('char_id')
+                    zkill_data = self.zkill_cache.get(char_id)
+                    zkill_results.append(zkill_data)
+                
                 self.last_zkill_results = zkill_results
 
                 im = self.create_display_image_from_processed_data(
@@ -196,57 +221,60 @@ class DScanAnalyzer:
         try:
             result = await self.resolve_names_to_ids_esi(char_names)
 
-            # Check cache first
-            cached_results = []
-            uncached_chars = []
+            # Fetch zkill data for all characters
             utils.tick()
-            for char in result:
-                char_id = char['char_id']
-                if char_id in self.zkill_cache:
-                    cached_results.append((char, self.zkill_cache[char_id]))
-                else:
-                    uncached_chars.append(char)
-            utils.tock('Cache check')
-            logger.log(f'Cached results: {len(cached_results)}')
-            logger.log(f'Uncached chars: {len(uncached_chars)}')
-            # Only fetch uncached data if needed
-            utils.tick()
-
             connector = aiohttp.TCPConnector(limit=200)
             async with aiohttp.ClientSession(connector=connector) as session:
                 zkill_tasks = [self.get_zkill_data_cached(
-                    session, char['char_id']) for char in uncached_chars]
-                uncached_zkill_results = await asyncio.gather(*zkill_tasks)
+                    session, char['char_id']) for char in result]
+                zkill_results = await asyncio.gather(*zkill_tasks)
 
-            # Combine cached and uncached results properly
-            uncached_results = [(char, zkill_data) for char, zkill_data in zip(
-                uncached_chars, uncached_zkill_results)]
-            all_results = cached_results + uncached_results
+            all_results = [(char, zkill_data) for char, zkill_data in zip(result, zkill_results)]
             utils.tock('zkill work')
+
+            # Get corp/alliance info for chars not on zkill
+            chars_needing_esi = []
+            for char, zkill_data in all_results:
+                if zkill_data is None or (isinstance(zkill_data, dict) and 'error' in zkill_data):
+                    chars_needing_esi.append(char['char_id'])
+
+            esi_char_info = {}
+            if chars_needing_esi:
+                esi_char_info = await self.get_char_info_esi(chars_needing_esi)
 
             corp_ids = []
             alliance_ids = []
             for char, zkill_data in all_results:
-                if zkill_data and zkill_data.get('info'):
+                if zkill_data and zkill_data.get('info') and 'error' not in zkill_data:
                     corp_id = zkill_data['info'].get('corporationID')
                     alliance_id = zkill_data['info'].get('allianceID')
-                    if corp_id:
-                        corp_ids.append(corp_id)
-                    if alliance_id:
-                        alliance_ids.append(alliance_id)
-
+                else:
+                    # Use ESI data for chars not on zkill or with errors
+                    char_info = esi_char_info.get(char['char_id'], {})
+                    corp_id = char_info.get('corporation_id')
+                    alliance_id = char_info.get('alliance_id')
+                
+                if corp_id:
+                    corp_ids.append(corp_id)
+                if alliance_id:
+                    alliance_ids.append(alliance_id)
 
             id_to_name = await self.ids_to_names_esi(corp_ids, alliance_ids)
-
+            tickers = await self.get_corp_alliance_tickers(corp_ids, alliance_ids)
+            
             logger.log(f'Resolved names: {len(id_to_name)} entries')
+            logger.log(f'Resolved tickers: {len(tickers)} entries')
 
             char_data_list = []
             for char, zkill_data in all_results:
-                corp_id = zkill_data.get('info', {}).get(
-                    'corporationID') if zkill_data else None
-                alliance_id = zkill_data.get('info', {}).get(
-                    'allianceID') if zkill_data else None
-            
+                if zkill_data and zkill_data.get('info'):
+                    corp_id = zkill_data['info'].get('corporationID')
+                    alliance_id = zkill_data['info'].get('allianceID')
+                else:
+                    char_info = esi_char_info.get(char['char_id'], {})
+                    corp_id = char_info.get('corporation_id')
+                    alliance_id = char_info.get('alliance_id')
+
                 char_info = {
                     'char_name': char['char_name'],
                     'char_id': char['char_id'],
@@ -254,10 +282,10 @@ class DScanAnalyzer:
                     'alliance_id': alliance_id,
                     'corp_name': id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown',
                     'alliance_name': id_to_name.get(alliance_id) if alliance_id else None,
+                    'corp_ticker': tickers.get(corp_id, {}).get('ticker') if corp_id else None,
+                    'alliance_ticker': tickers.get(alliance_id, {}).get('ticker') if alliance_id else None,
                     'zkill_link': f"https://zkillboard.com/character/{char['char_id']}/"
                 }
-                if char_info['corp_name']  == 'Unknown':
-                    return
                 char_data_list.append(char_info)
 
             return char_data_list
@@ -295,8 +323,13 @@ class DScanAnalyzer:
     def should_ignore_character(self, char_data):
         corp_name = char_data.get('corp_name', '')
         alliance_name = char_data.get('alliance_name', '')
-        return (corp_name in self.ignore_corps or
-                alliance_name in self.ignore_alliances)
+        corp_ticker = char_data.get('corp_ticker', '')
+        alliance_ticker = char_data.get('alliance_ticker', '')
+        
+        return (corp_name in self.ignore_corps or 
+                alliance_name in self.ignore_alliances or
+                corp_ticker in self.ignore_corps or
+                alliance_ticker in self.ignore_alliances)
 
     def create_display_image_from_processed_data(self, char_data_list, zkill_results=None):
         if not char_data_list:
@@ -306,15 +339,24 @@ class DScanAnalyzer:
         combined_data = []
 
         for i, char_data in enumerate(char_data_list):
-            zkill_data = zkill_results[i] if zkill_results and i < len(
-                zkill_results) else None
+            zkill_data = zkill_results[i] if zkill_results and i < len(zkill_results) else None
 
-            if zkill_data is None:
-                # Character not found on zkillboard
+            if zkill_data is None or (isinstance(zkill_data, dict) and 'error' in zkill_data):
+                if zkill_data and zkill_data.get('error') == 'rate_limited':
+                    status = 'Rate limited'
+                    color = (0, 165, 255)  # Orange
+                elif zkill_data and zkill_data.get('error') == 'not_found':
+                    status = 'Not on zkill'
+                    color = (128, 128, 128)  # Gray
+                else:
+                    status = 'API error'
+                    color = (0, 0, 255)  # Red
+                
                 combined_data.append({
                     'name': char_data['char_name'],
-                    'zkill_status': 'Not on zkill',
-                    'zkill_link': char_data.get('zkill_link')
+                    'zkill_status': status,
+                    'zkill_link': char_data.get('zkill_link'),
+                    'color': color
                 })
             else:
                 danger = zkill_data.get('dangerRatio', 0)
@@ -363,11 +405,10 @@ class DScanAnalyzer:
             name = data['name'][:20]
             if 'zkill_status' in data:
                 text = f"{name} | {data['zkill_status']}"
-                color = (128, 128, 128)  # Gray for not found
+                color = data.get('color', (128, 128, 128))
             else:
                 text = f"{name} | D:{data['danger']:.1f} K:{data['kills']} L:{data['losses']}"
-                color = (255, 255, 255) if data['danger'] == 0 else (
-                    0, 0, 255) if data['danger'] >= 80 else (0, 255, 255)
+                color = (255, 255, 255) if data['danger'] == 0 else (0, 0, 255) if data['danger'] >= 80 else (0, 255, 255)
 
             text_w, text_h = utils.get_text_size_withnewline(
                 text, (10, y), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
@@ -630,15 +671,146 @@ class DScanAnalyzer:
 
     async def get_zkill_data_cached(self, session, char_id):
         if char_id in self.zkill_cache:
-            return self.zkill_cache[char_id]
+            cached_data = self.zkill_cache[char_id]
+            # Don't use cached rate limit errors - retry them
+            if isinstance(cached_data, dict) and cached_data.get('error') == 'rate_limited':
+                pass  # Fall through to fetch again
+            else:
+                return cached_data
 
         data = await get_zkill_data_async(session, char_id)
-        self.zkill_cache[char_id] = data
+        # Only cache successful responses and permanent errors (not rate limits)
+        if data is not None and not (isinstance(data, dict) and data.get('error') == 'rate_limited'):
+            self.zkill_cache[char_id] = data
         return data
 
     def toggle_mode(self):
         self.aggregated_mode = not self.aggregated_mode
         self.mode_changed = True
+
+    async def get_char_info_esi(self, char_ids):
+        """Get character corporation and alliance info from ESI"""
+        char_info = {}
+        uncached_ids = []
+        
+        # Check cache first
+        for char_id in char_ids:
+            if char_id in self.esi_char_cache:
+                char_info[char_id] = self.esi_char_cache[char_id]
+            else:
+                uncached_ids.append(char_id)
+        
+        if not uncached_ids:
+            return char_info
+        
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for char_id in uncached_ids:
+                url = f"https://esi.evetech.net/latest/characters/{char_id}/"
+                tasks.append(self._fetch_char_info(session, char_id, url))
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for char_id, result in zip(uncached_ids, results):
+                if not isinstance(result, Exception) and result:
+                    self.esi_char_cache[char_id] = result
+                    char_info[char_id] = result
+        
+        return char_info
+
+    async def _fetch_char_info(self, session, char_id, url):
+        """Helper to fetch individual character info"""
+        try:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {
+                        'corporation_id': data.get('corporation_id'),
+                        'alliance_id': data.get('alliance_id')
+                    }
+        except Exception as e:
+            logger.log(f"Error fetching ESI data for char {char_id}: {e}")
+        return {}
+
+    async def get_corp_alliance_tickers(self, corp_ids, alliance_ids):
+        """Get corporation and alliance tickers from ESI"""
+        tickers = {}
+        uncached_corp_ids = []
+        uncached_alliance_ids = []
+        
+        # Check cache first
+        for corp_id in corp_ids:
+            if corp_id and corp_id in self.ticker_cache:
+                tickers[corp_id] = self.ticker_cache[corp_id]
+            elif corp_id:
+                uncached_corp_ids.append(corp_id)
+        
+        for alliance_id in alliance_ids:
+            if alliance_id and alliance_id in self.ticker_cache:
+                tickers[alliance_id] = self.ticker_cache[alliance_id]
+            elif alliance_id:
+                uncached_alliance_ids.append(alliance_id)
+        
+        if not uncached_corp_ids and not uncached_alliance_ids:
+            return tickers
+        
+        async with aiohttp.ClientSession() as session:
+            # Get corp tickers
+            corp_tasks = []
+            for corp_id in uncached_corp_ids:
+                url = f"https://esi.evetech.net/latest/corporations/{corp_id}/"
+                corp_tasks.append(self._fetch_corp_info(session, corp_id, url))
+            
+            # Get alliance tickers
+            alliance_tasks = []
+            for alliance_id in uncached_alliance_ids:
+                url = f"https://esi.evetech.net/latest/alliances/{alliance_id}/"
+                alliance_tasks.append(self._fetch_alliance_info(session, alliance_id, url))
+            
+            if corp_tasks:
+                corp_results = await asyncio.gather(*corp_tasks, return_exceptions=True)
+                for corp_id, result in zip(uncached_corp_ids, corp_results):
+                    if not isinstance(result, Exception) and result:
+                        self.ticker_cache[corp_id] = result
+                        tickers[corp_id] = result
+            
+            if alliance_tasks:
+                alliance_results = await asyncio.gather(*alliance_tasks, return_exceptions=True)
+                for alliance_id, result in zip(uncached_alliance_ids, alliance_results):
+                    if not isinstance(result, Exception) and result:
+                        self.ticker_cache[alliance_id] = result
+                        tickers[alliance_id] = result
+        
+        return tickers
+
+    async def _fetch_corp_info(self, session, corp_id, url):
+        """Helper to fetch corporation info"""
+        try:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {'ticker': data.get('ticker')}
+        except Exception as e:
+            logger.log(f"Error fetching corp info for {corp_id}: {e}")
+        return {}
+
+    async def _fetch_alliance_info(self, session, alliance_id, url):
+        """Helper to fetch alliance info"""
+        try:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {'ticker': data.get('ticker')}
+        except Exception as e:
+            logger.log(f"Error fetching alliance info for {alliance_id}: {e}")
+        return {}
+
+    def clear_cache(self):
+        self.name_cache = NameIdCache()
+        self.zkill_cache = {}
+        self.esi_char_cache = {}
+        self.ticker_cache = {}
+        logger.log("All caches cleared")
 
 
 def main():
