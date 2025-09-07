@@ -1,11 +1,8 @@
 import requests
 import pyperclip
 import time
-from datetime import datetime
-from bs4 import BeautifulSoup
 import re
 from rich import print
-import json
 import asyncio
 import aiohttp
 from config import C
@@ -31,22 +28,20 @@ async def get_zkill_data_async(session, char_id):
 
 class NameIdCache:
     def __init__(self):
-        self.data = {}
+        self.data = bidict()
 
     def get_id(self, name):
-        return next((k for k, v in self.data.items() if v == name and isinstance(k, int)), None)
+        return self.data.inverse.get(name)
 
     def get_name(self, id):
         return self.data.get(id)
 
     def add_mapping(self, name, id):
         self.data[id] = name
-        self.data[name] = id
 
 
 class DScanAnalyzer:
     def __init__(self):
-        self.base_url = "https://dscan.info"
         self.zkill_base = "https://zkillboard.com/api"
         self.ignore_alliances = C.dscan.get('ignore_alliances', [])
         self.ignore_corps = C.dscan.get('ignore_corps', [])
@@ -127,100 +122,67 @@ class DScanAnalyzer:
 
     def parse_dscan(self, dscan_data):
         try:
-            timestamp = int(time.time() * 1000)
-            url = f"{self.base_url}/?_={timestamp}"
-            payload = {"paste": dscan_data}
-            response = requests.post(url, data=payload, timeout=10)
-
-            if response.status_code == 200:
-                response_text = response.text.strip()
-                if response_text.startswith("OK;"):
-                    scan_id = response_text.split(";")[1]
-                    return self.fetch_scan_results(scan_id)
+            lines = dscan_data.strip().split('\n')
+            char_names = []
+            
+            is_dscan = any('\t' in line for line in lines[:5])
+            
+            for line in lines:
+                if is_dscan:
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        char_name = parts[1].strip()
+                        if char_name and not char_name.startswith('Jita IV'):
+                            char_names.append(char_name)
                 else:
-                    return self.parse_html_results(response_text)
-            else:
-                print(f"HTTP error: {response.status_code}")
-                return None
+                    char_name = line.strip()
+                    if char_name:
+                        char_names.append(char_name)
+            
+            return asyncio.run(self.process_names_esi(char_names))
         except Exception as e:
-            print(f"Request failed: {e}")
+            print(f"Error parsing dscan: {e}")
             return None
 
-    def fetch_scan_results(self, scan_id):
+    async def process_names_esi(self, char_names):
         try:
-            url = f"{self.base_url}/v/{scan_id}"
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                return self.parse_html_results(response.text)
-            else:
-                print(f"Failed to fetch scan results: {response.status_code}")
-                return None
+            result = await self.resolve_names_to_ids_esi(char_names)
+            
+            connector = aiohttp.TCPConnector(limit=200)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                zkill_tasks = [get_zkill_data_async(session, char['char_id']) for char in result]
+                zkill_results = await asyncio.gather(*zkill_tasks)
+
+            corp_ids = []
+            alliance_ids = []
+            for char, zkill_data in zip(result, zkill_results):
+                if zkill_data and zkill_data.get('info'):
+                    corp_id = zkill_data['info'].get('corporationID')
+                    alliance_id = zkill_data['info'].get('allianceID')
+                    if corp_id:
+                        corp_ids.append(corp_id)
+                    if alliance_id:
+                        alliance_ids.append(alliance_id)
+            id_to_name = await self.ids_to_names_esi(corp_ids, alliance_ids)
+
+            char_data_list = []
+            for char, zkill_data in zip(result, zkill_results):
+                corp_id = zkill_data.get('info', {}).get('corporationID') if zkill_data else None
+                alliance_id = zkill_data.get('info', {}).get('allianceID') if zkill_data else None
+
+                char_info = {
+                    'char_name': char['char_name'],
+                    'corp_name': id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown',
+                    'alliance_name': id_to_name.get(alliance_id) if alliance_id else None,
+                    'zkill_link': f"https://zkillboard.com/character/{char['char_id']}/"
+                }
+                char_data_list.append(char_info)
+
+            return char_data_list
         except Exception as e:
-            print(f"Error fetching scan results: {e}")
+            print(f"Error processing names via ESI: {e}")
             return None
 
-    def parse_character_results(self, html_content):
-        soup = BeautifulSoup(html_content, 'html.parser')
-        character_list = []
-
-        table = soup.find('table', id='characterlist')
-        if not table:
-            return character_list
-
-        # Find all table rows `<tr>` within the table body `<tbody>`
-        rows = table.tbody.find_all('tr')
-
-        for row in rows:
-            # Get all columns `<td>` in the row
-            cols = row.find_all('td')
-            if len(cols) == 3:
-                # Extract text, stripping whitespace and button text
-                char_name = cols[0].get_text(strip=True)
-                corp_name = cols[1].get_text(strip=True)
-                alliance_name_raw = cols[2].get_text(strip=True)
-
-                character_data = {
-                    'char_name': char_name,
-                    'corp_name': corp_name,
-                    'alliance_name': None if alliance_name_raw == 'No alliance' else alliance_name_raw
-                }
-                character_list.append(character_data)
-
-        return character_list
-
-    def parse_character_results(self, html):
-        soup = BeautifulSoup(html, 'html.parser')
-        character_list = []
-
-        table = soup.find('table', id='characterlist')
-        if not table or not table.tbody:
-            return character_list
-
-        rows = table.tbody.find_all('tr')
-
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) == 3:
-                zkill_tag = cols[0].find(
-                    'a', href=re.compile("zkillboard.com"))
-                zkill_link = zkill_tag['href'] if zkill_tag else None
-
-                char_name = cols[0].get_text(strip=True)
-                corp_name = cols[1].get_text(strip=True)
-                alliance_name_raw = cols[2].get_text(strip=True)
-
-                character_data = {
-                    'char_name': char_name,
-                    'corp_name': corp_name,
-                    'alliance_name': None if alliance_name_raw == 'No alliance' else alliance_name_raw,
-                    'zkill_link': zkill_link
-                }
-                character_list.append(character_data)
-
-        return character_list
-
-    def parse_html_results(self, html):
-        return self.parse_character_results(html)
 
     async def get_zkill_stats_async(self, session, char_name):
         try:
