@@ -1,0 +1,12 @@
+dscan:
+  bg_color: [25, 25, 25]
+  enabled: true
+  font_scale: 0.5
+  font_thickness: 1
+  hotkey_transparency: alt+shift+f
+  ignore_alliances: []
+  ignore_corps: []
+  timeout: 15
+  transparency: 180
+  transparency_color: [64, 64, 64]
+  transparency_on: true

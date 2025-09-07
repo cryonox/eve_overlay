@@ -1,0 +1,5 @@
+dist
+build
+.pixi
+*.pyc
+config.private.yaml

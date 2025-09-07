@@ -1,0 +1,63 @@
+11198	长短反抓人	Stiletto	220 km
+1944	运送	Bestower	4,165 m
+22428	洋芋车车	Redeemer	-
+33151	毁灭吧	Brutix Navy Issue	220 km
+33151	毁灭吧	Brutix Navy Issue	219 km
+20183	普罗维登斯	Providence	121 km
+37456	抓人用	Maulus Navy Issue	219 km
+32880	冲锋者级 - Utia Huunuras	Venture	27 km
+44996	マーシャル* - Ryuu Takasugi	Marshal	9,474 m
+29248	マグニート44	Magnate	286 km
+54733	サンダーチャイルド* - Ryuu Takasugi	Thunderchild	9,498 m
+22436	♞亡命天涯&gt;♓♓°&gt;	Widow	-
+22546	∑Skiff	Skiff	17 km
+12745	dUDE	Occator	4,909 m
+3756	X.N.C	Gnosis	132 km
+47466	X.N.C	Praxis	138 km
+648	Unsinkable 3	Badger	2,636 m
+4310	Tornado 3 F	Tornado	24 km
+3297	Small Standard Container	Small Standard Container	-
+17478	Retriever - Fluffy Savage	Retriever	1,103 m
+588	Reaper - Setanubi	Reaper	3,451 km
+588	Reaper - Romanticin	Reaper	-
+605	Program_Heron	Heron	13 km
+655	Planetside	Epithal	133 km
+2998	Noctis - Dempz Nagression	Noctis	3,729 m
+650	Nereids	Nereus	-
+605	Mrnibbles Miner	Heron	14 km
+34828	Locked On	Jackdaw	137 km
+17843	Little Potato	Vexor Navy Issue	43 km
+29248	JunkDog	Magnate	219 km
+1531	Jita IV - Moon 6 - Ytiri Storage	Caldari Trading Station	275,680 km
+4024	Jita IV - Moon 6 - Hyasyoda Corporation Refinery	Caldari Food Processing Plant Station	275,980 km
+1529	Jita IV - Moon 6 - Caldari Provisions School	Caldari Administrative Station	273,435 km
+1529	Jita IV - Moon 5 - Caldari Navy Assembly Plant	Caldari Administrative Station	635,162 km
+52678	Jita IV - Moon 4 - Caldari Navy Assembly Plant	Jita Trade Hub	0 m
+1529	Jita IV - Moon 4 - Caldari Business Tribunal Bureau Offices	Caldari Administrative Station	1,078 km
+1529	Jita IV - Moon 11 - Expert Housing Production Plant	Caldari Administrative Station	1,841,551 km
+1529	Jita IV - Moon 10 - Caldari Constructions Production Plant	Caldari Administrative Station	1,430,130 km
+3871	Jita IV - Moon 10 - Caldari Business Tribunal Law School	Caldari Station Hub	1,431,813 km
+3872	Jita IV - Caldari Business Tribunal Information Center	Caldari Military Station	341,113 km
+596	Impairor - Dmitri Yurievich	Impairor	-
+601	Ibis — Okarynok	Ibis	738 km
+601	Ibis - DuongProxx	Ibis	131 km
+601	Ibis - Aquatis	Ibis	86 km
+12753	Etermity	Impel	-
+16242	Don't be a bad	Thrasher	42 km
+37480	DDG-202	Bifrost	8,858 m
+23	Cargo Container	Cargo Container	39 km
+23	Cargo Container	Cargo Container	219 km
+23	Cargo Container	Cargo Container	24 km
+23	Cargo Container	Cargo Container	27 km
+670	Capsule - S0dET	Capsule	629 km
+670	Capsule - Aaaaarg	Capsule	139 km
+672	Caldari Shuttle — Everton-the dominant lifeform	Caldari Shuttle	-
+672	Caldari Shuttle* — Pyyrvonami Pous Haginen	Caldari Shuttle	-
+17713	Anti Gank	Stabber Fleet Issue	156 km
+11188	Anathema - Klasmious	Anathema	60 km
+672	878798	Caldari Shuttle	-
+672	123254	Caldari Shuttle	-
+12038	113-Puri	Purifier	1,675 km
+28606	1	Orca	39 km
+3756	**灵感级*&lt;/localize	Gnosis	20 km
+11172	**T2 Explo Helios	Helios	8,073 m
