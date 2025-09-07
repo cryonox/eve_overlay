@@ -59,6 +59,8 @@ class DScanAnalyzer:
         self.last_result_total_time = None
         self.name_cache = NameIdCache()
         self.zkill_cache = {}
+        self.aggregated_mode = False
+        self.mode_changed = False
         cv2.namedWindow(self.win_name, cv2.WINDOW_AUTOSIZE)
         cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
         cv2.setMouseCallback(self.win_name, self.mouse_callback)
@@ -68,8 +70,10 @@ class DScanAnalyzer:
                                   self.win_name, self.transparency, (64, 64, 64))
 
         hotkey_transparency = C.dscan.get('hotkey_transparency', 'alt+shift+f')
+        hotkey_mode = C.dscan.get('hotkey_mode', 'alt+shift+m')
         bindings = [
-            [hotkey_transparency.split('+'), None, self.toggle_transparency]
+            [hotkey_transparency.split('+'), None, self.toggle_transparency],
+            [hotkey_mode.split('+'), None, self.toggle_mode]
         ]
         register_hotkeys(bindings)
         start_checking_hotkeys()
@@ -130,9 +134,9 @@ class DScanAnalyzer:
                 char_name = line.strip()
                 if char_name:
                     char_names.append(char_name)
-            
+
             data = await self.process_names_esi(char_names)
-            
+
             if not data:
                 self.show_status("")
                 return
@@ -145,21 +149,31 @@ class DScanAnalyzer:
                 return
 
             self.result_start_time = time.time()
-
-            tasks = [self.fetch_zkill_data(char_data) for char_data in filtered_data]
-            zkill_results = await asyncio.gather(*tasks)
-
             self.last_parsed_data = filtered_data
-            self.last_zkill_results = zkill_results
 
-            im = self.create_display_image_from_processed_data(filtered_data, zkill_results)
-            if im is not None:
-                self.last_result_im = im
-                self.last_im = im
-                cv2.imshow(self.win_name, im)
-                cv2.waitKey(1)
-                self.handle_transparency()
-            
+            if self.aggregated_mode:
+                im = self.create_aggregated_display(filtered_data)
+                if im is not None:
+                    self.last_result_im = im
+                    self.last_im = im
+                    cv2.imshow(self.win_name, im)
+                    cv2.waitKey(1)
+                    self.handle_transparency()
+            else:
+                tasks = [self.fetch_zkill_data(char_data)
+                         for char_data in filtered_data]
+                zkill_results = await asyncio.gather(*tasks)
+                self.last_zkill_results = zkill_results
+
+                im = self.create_display_image_from_processed_data(
+                    filtered_data, zkill_results)
+                if im is not None:
+                    self.last_result_im = im
+                    self.last_im = im
+                    cv2.imshow(self.win_name, im)
+                    cv2.waitKey(1)
+                    self.handle_transparency()
+
         except Exception as e:
             logger.log(f"Error parsing dscan: {e}")
             return None
@@ -167,9 +181,9 @@ class DScanAnalyzer:
     def parse_clipboard(self, clipboard_data):
         try:
             lines = clipboard_data.strip().split('\n')
-            
+
             is_dscan = any('\t' in line for line in lines[:5])
-            
+
             if is_dscan:
                 logger.log('dscan detected. not implemented yet')
             else:
@@ -181,33 +195,38 @@ class DScanAnalyzer:
     async def process_names_esi(self, char_names):
         try:
             result = await self.resolve_names_to_ids_esi(char_names)
-            
+
             # Check cache first
             cached_results = []
             uncached_chars = []
-            utils.tick() 
+            utils.tick()
             for char in result:
                 char_id = char['char_id']
                 if char_id in self.zkill_cache:
-                    cached_results.append(self.zkill_cache[char_id])
+                    cached_results.append((char, self.zkill_cache[char_id]))
                 else:
                     uncached_chars.append(char)
             utils.tock('Cache check')
-            logger.log(f'Cached results: {len(cached_results)}') 
+            logger.log(f'Cached results: {len(cached_results)}')
             logger.log(f'Uncached chars: {len(uncached_chars)}')
             # Only fetch uncached data if needed
             utils.tick()
 
             connector = aiohttp.TCPConnector(limit=200)
             async with aiohttp.ClientSession(connector=connector) as session:
-                zkill_tasks = [self.get_zkill_data_cached(session, char['char_id']) for char in uncached_chars]
-                uncached_results = await asyncio.gather(*zkill_tasks)
-            zkill_results = cached_results + uncached_results
+                zkill_tasks = [self.get_zkill_data_cached(
+                    session, char['char_id']) for char in uncached_chars]
+                uncached_zkill_results = await asyncio.gather(*zkill_tasks)
+
+            # Combine cached and uncached results properly
+            uncached_results = [(char, zkill_data) for char, zkill_data in zip(
+                uncached_chars, uncached_zkill_results)]
+            all_results = cached_results + uncached_results
             utils.tock('zkill work')
 
             corp_ids = []
             alliance_ids = []
-            for char, zkill_data in zip(result, zkill_results):
+            for char, zkill_data in all_results:
                 if zkill_data and zkill_data.get('info'):
                     corp_id = zkill_data['info'].get('corporationID')
                     alliance_id = zkill_data['info'].get('allianceID')
@@ -215,27 +234,36 @@ class DScanAnalyzer:
                         corp_ids.append(corp_id)
                     if alliance_id:
                         alliance_ids.append(alliance_id)
+
+
             id_to_name = await self.ids_to_names_esi(corp_ids, alliance_ids)
 
-            char_data_list = []
-            for char, zkill_data in zip(result, zkill_results):
-                corp_id = zkill_data.get('info', {}).get('corporationID') if zkill_data else None
-                alliance_id = zkill_data.get('info', {}).get('allianceID') if zkill_data else None
+            logger.log(f'Resolved names: {len(id_to_name)} entries')
 
+            char_data_list = []
+            for char, zkill_data in all_results:
+                corp_id = zkill_data.get('info', {}).get(
+                    'corporationID') if zkill_data else None
+                alliance_id = zkill_data.get('info', {}).get(
+                    'allianceID') if zkill_data else None
+            
                 char_info = {
                     'char_name': char['char_name'],
                     'char_id': char['char_id'],
+                    'corp_id': corp_id,
+                    'alliance_id': alliance_id,
                     'corp_name': id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown',
                     'alliance_name': id_to_name.get(alliance_id) if alliance_id else None,
                     'zkill_link': f"https://zkillboard.com/character/{char['char_id']}/"
                 }
+                if char_info['corp_name']  == 'Unknown':
+                    return
                 char_data_list.append(char_info)
 
             return char_data_list
         except Exception as e:
             logger.log(f"Error processing names via ESI: {e}")
             return None
-
 
     async def get_zkill_stats_async(self, session, char_name):
         try:
@@ -262,11 +290,7 @@ class DScanAnalyzer:
     async def fetch_zkill_data(self, char_data):
         async with aiohttp.ClientSession() as session:
             char_id = char_data.get('char_id')
-            if char_id:
-                return await self.get_zkill_data_cached(session, char_id)
-            else:
-                # Need to search for char_id first, then cache by char_id
-                return await self.get_zkill_stats_async(session, char_data['char_name'])
+            return await self.get_zkill_data_cached(session, char_id)
 
     def should_ignore_character(self, char_data):
         corp_name = char_data.get('corp_name', '')
@@ -280,28 +304,33 @@ class DScanAnalyzer:
 
         self.char_rects = {}
         combined_data = []
-        
+
         for i, char_data in enumerate(char_data_list):
-            zkill_data = zkill_results[i] if zkill_results and i < len(zkill_results) else None
-            
-            danger = 0
-            kills = 0
-            losses = 0
-            
-            if zkill_data:
+            zkill_data = zkill_results[i] if zkill_results and i < len(
+                zkill_results) else None
+
+            if zkill_data is None:
+                # Character not found on zkillboard
+                combined_data.append({
+                    'name': char_data['char_name'],
+                    'zkill_status': 'Not on zkill',
+                    'zkill_link': char_data.get('zkill_link')
+                })
+            else:
                 danger = zkill_data.get('dangerRatio', 0)
                 kills = zkill_data.get('shipsDestroyed', 0)
                 losses = zkill_data.get('shipsLost', 0)
-            
-            combined_data.append({
-                'name': char_data['char_name'],
-                'danger': danger,
-                'kills': kills,
-                'losses': losses,
-                'zkill_link': char_data.get('zkill_link')
-            })
 
-        combined_data.sort(key=lambda x: x['danger'], reverse=True)
+                combined_data.append({
+                    'name': char_data['char_name'],
+                    'danger': danger,
+                    'kills': kills,
+                    'losses': losses,
+                    'zkill_link': char_data.get('zkill_link')
+                })
+
+        # Sort by danger, putting "Not on zkill" entries at the end
+        combined_data.sort(key=lambda x: x.get('danger', -1), reverse=True)
 
         remaining_time = max(0, self.display_duration - (time.time() - self.result_start_time)
                              ) if self.result_start_time else self.display_duration
@@ -314,7 +343,10 @@ class DScanAnalyzer:
         text_lines = [header_text]
         for data in combined_data:
             name = data['name'][:20]
-            text = f"{name} | D:{data['danger']:.1f} K:{data['kills']} L:{data['losses']}"
+            if 'zkill_status' in data:
+                text = f"{name} | {data['zkill_status']}"
+            else:
+                text = f"{name} | D:{data['danger']:.1f} K:{data['kills']} L:{data['losses']}"
             text_lines.append(text)
 
         full_text = '\n'.join(text_lines)
@@ -329,7 +361,13 @@ class DScanAnalyzer:
 
         for data in combined_data:
             name = data['name'][:20]
-            text = f"{name} | D:{data['danger']:.1f} K:{data['kills']} L:{data['losses']}"
+            if 'zkill_status' in data:
+                text = f"{name} | {data['zkill_status']}"
+                color = (128, 128, 128)  # Gray for not found
+            else:
+                text = f"{name} | D:{data['danger']:.1f} K:{data['kills']} L:{data['losses']}"
+                color = (255, 255, 255) if data['danger'] == 0 else (
+                    0, 0, 255) if data['danger'] >= 80 else (0, 255, 255)
 
             text_w, text_h = utils.get_text_size_withnewline(
                 text, (10, y), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
@@ -337,11 +375,64 @@ class DScanAnalyzer:
             self.char_rects[data['name']] = (
                 (10, y, text_w, text_h), data['zkill_link'])
 
-            color = (255, 255, 255) if data['danger'] == 0 else (
-                0, 0, 255) if data['danger'] >= 80 else (0, 255, 255)
-
             y = utils.draw_text_withnewline(
                 im, text, (10, y), color=color, bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+
+        return im
+
+    def create_aggregated_display(self, char_data_list):
+        if not char_data_list:
+            return None
+
+        corp_counts = {}
+        alliance_counts = {}
+
+        for char_data in char_data_list:
+            corp_name = char_data.get('corp_name', 'Unknown')
+            alliance_name = char_data.get('alliance_name')
+
+            corp_counts[corp_name] = corp_counts.get(corp_name, 0) + 1
+            if alliance_name:
+                alliance_counts[alliance_name] = alliance_counts.get(
+                    alliance_name, 0) + 1
+
+        remaining_time = max(0, self.display_duration - (time.time() - self.result_start_time)
+                             ) if self.result_start_time else self.display_duration
+        pilot_count = len(char_data_list)
+
+        if self.last_result_total_time:
+            header_text = f"Aggregated | Pilots: {pilot_count} | Time: {self.last_result_total_time/1000:.2f}s | Timeout: {remaining_time:.0f}s"
+        else:
+            header_text = f"Aggregated | Pilots: {pilot_count} | Timeout: {remaining_time:.0f}s"
+
+        text_lines = [header_text, ""]
+
+        if alliance_counts:
+            text_lines.append("Alliances:")
+            sorted_alliances = sorted(
+                alliance_counts.items(), key=lambda x: x[1], reverse=True)
+            for alliance_name, count in sorted_alliances:
+                text_lines.append(f"  {alliance_name}: {count}")
+
+        if corp_counts:
+            if alliance_counts:
+                text_lines.append("")
+            text_lines.append("Corporations:")
+            sorted_corps = sorted(corp_counts.items(),
+                                  key=lambda x: x[1], reverse=True)
+            for corp_name, count in sorted_corps:
+                text_lines.append(f"  {corp_name}: {count}")
+
+        full_text = '\n'.join(text_lines)
+        w, h = utils.get_text_size_withnewline(
+            full_text, (20, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+
+        im = np.zeros((h, w, 3), dtype=np.uint8)
+        im[:] = C.dscan.transparency_color
+
+        utils.draw_text_withnewline(im, full_text, (10, 20), color=(255, 255, 255),
+                                    bg_color=self.bg_color, font_scale=C.dscan.font_scale,
+                                    font_thickness=C.dscan.font_thickness)
 
         return im
 
@@ -373,12 +464,35 @@ class DScanAnalyzer:
                     self.show_status("")
                     self.result_start_time = None
                     self.last_result_im = None
-                
-                if self.result_start_time and hasattr(self, 'last_parsed_data') and hasattr(self, 'last_zkill_results'):
-                    im = self.create_display_image_from_processed_data(
-                        self.last_parsed_data, self.last_zkill_results)
+
+                if self.result_start_time and hasattr(self, 'last_parsed_data'):
+                    if self.aggregated_mode:
+                        im = self.create_aggregated_display(
+                            self.last_parsed_data)
+                    elif hasattr(self, 'last_zkill_results'):
+                        im = self.create_display_image_from_processed_data(
+                            self.last_parsed_data, self.last_zkill_results)
+                    else:
+                        im = None
+
                     if im is not None:
                         cv2.imshow(self.win_name, im)
+
+                if self.mode_changed and hasattr(self, 'last_parsed_data'):
+                    if self.aggregated_mode:
+                        im = self.create_aggregated_display(
+                            self.last_parsed_data)
+                    else:
+                        im = self.create_display_image_from_processed_data(
+                            self.last_parsed_data, getattr(self, 'last_zkill_results', None))
+                    if im is not None:
+                        self.last_result_im = im
+                        self.last_im = im
+                        cv2.imshow(self.win_name, im)
+                        # Reset timeout when switching modes
+                        if not self.result_start_time:
+                            self.result_start_time = time.time()
+                    self.mode_changed = False
 
                 cv2.waitKey(100)
                 self.handle_transparency()
@@ -394,7 +508,8 @@ class DScanAnalyzer:
         async with aiohttp.ClientSession() as session:
             async with session.post(names_url, json=char_names) as response:
                 if response.status != 200:
-                    logger.log(f"Failed to resolve names batch: {response.status}")
+                    logger.log(
+                        f"Failed to resolve names batch: {response.status}")
                     return []
 
                 names_data = await response.json()
@@ -437,7 +552,8 @@ class DScanAnalyzer:
 
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.log(f"Error resolving names via ESI after {elapsed:.2f}s: {e}")
+            logger.log(
+                f"Error resolving names via ESI after {elapsed:.2f}s: {e}")
             return []
         finally:
             elapsed = time.time() - start_time
@@ -454,7 +570,8 @@ class DScanAnalyzer:
         async with aiohttp.ClientSession() as session:
             async with session.post(names_url, json=all_ids) as response:
                 if response.status != 200:
-                    logger.log(f"Failed to resolve IDs batch: {response.status}")
+                    logger.log(
+                        f"Failed to resolve IDs batch: {response.status}")
                     return {}
 
                 names_data = await response.json()
@@ -476,6 +593,9 @@ class DScanAnalyzer:
                 else:
                     uncached_ids.append(id)
 
+            logger.log(f'Cached ID->name results: {len(cached_results)}')
+            logger.log(f'Uncached IDs: {len(uncached_ids)}')
+
             if not uncached_ids:
                 return cached_results
 
@@ -489,6 +609,9 @@ class DScanAnalyzer:
 
                 chunk_results = await self._resolve_ids_batch_esi(chunk_corp_ids, chunk_alliance_ids)
 
+                logger.log(
+                    f'Chunk resolved {len(chunk_results)} names from {len(chunk)} IDs')
+
                 for id, name in chunk_results.items():
                     self.name_cache.add_mapping(name, id)
 
@@ -498,7 +621,8 @@ class DScanAnalyzer:
 
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.log(f"Error resolving IDs via ESI after {elapsed:.2f}s: {e}")
+            logger.log(
+                f"Error resolving IDs via ESI after {elapsed:.2f}s: {e}")
             return {}
         finally:
             elapsed = time.time() - start_time
@@ -507,15 +631,20 @@ class DScanAnalyzer:
     async def get_zkill_data_cached(self, session, char_id):
         if char_id in self.zkill_cache:
             return self.zkill_cache[char_id]
-        
+
         data = await get_zkill_data_async(session, char_id)
         self.zkill_cache[char_id] = data
         return data
+
+    def toggle_mode(self):
+        self.aggregated_mode = not self.aggregated_mode
+        self.mode_changed = True
 
 
 def main():
     analyzer = DScanAnalyzer()
     analyzer.monitor_clipboard()
+
 
 if __name__ == "__main__":
     main()

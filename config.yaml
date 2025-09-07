@@ -6,6 +6,7 @@ dscan:
   font_scale: 0.5
   font_thickness: 1
   hotkey_transparency: alt+shift+f
+  hotkey_mode: alt+shift+m
   ignore_alliances: []
   ignore_corps: []
   timeout: 15
