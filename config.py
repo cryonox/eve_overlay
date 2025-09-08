@@ -50,7 +50,8 @@ def create_default_config(fpath):
             'transparency': 180,
             'transparency_color': [64, 64, 64],
             'bg_color': [25, 25, 25],
-            'timeout': 15
+            'timeout': 15,
+            'diff_timeout': 60
         }
     }
 

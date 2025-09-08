@@ -103,6 +103,11 @@ class DScanAnalyzer:
 
         self.show_status("")
 
+        self.last_ship_counts = None
+        self.previous_ship_counts = None
+        self.is_diff_mode = False
+        self.last_dscan_time = None
+
     def toggle_transparency(self):
         self.transparency_on = not self.transparency_on
         self.should_destroy_window = True
@@ -210,6 +215,13 @@ class DScanAnalyzer:
             with open('ships.json', 'r') as f:
                 ships = json.load(f)
             
+            # Clear diff mode if too much time has passed
+            current_time = time.time()
+            if self.last_dscan_time and current_time - self.last_dscan_time > 60:  # 60 seconds
+                self.last_ship_counts = None
+                self.previous_ship_counts = None
+                self.is_diff_mode = False
+            
             lines = dscan_data.strip().split('\n')
             ship_counts = {}
             
@@ -241,7 +253,15 @@ class DScanAnalyzer:
                 self.show_status("No ships found in dscan")
                 return
             
+            # Check if this is a consecutive dscan for diff mode
+            if self.last_ship_counts is not None:
+                self.previous_ship_counts = self.last_ship_counts
+                self.is_diff_mode = True
+            else:
+                self.is_diff_mode = False
+            
             self.result_start_time = time.time()
+            self.last_dscan_time = current_time
             self.last_ship_counts = ship_counts
             
             # Create display
@@ -266,6 +286,10 @@ class DScanAnalyzer:
             if is_dscan:
                 return asyncio.run(self.parse_dscan(clipboard_data))
             else:
+                # Reset dscan state when switching to local
+                self.last_ship_counts = None
+                self.previous_ship_counts = None
+                self.is_diff_mode = False
                 return asyncio.run(self.parse_local(clipboard_data))
         except Exception as e:
             logger.log(f"Error parsing clipboard: {e}")
@@ -533,21 +557,42 @@ class DScanAnalyzer:
 
     def create_dscan_display(self, ship_counts):
         try:
+            # Calculate ship diffs if in diff mode
+            ship_diffs = {}
+            if self.is_diff_mode and self.previous_ship_counts:
+                ship_diffs = self.calculate_ship_diffs(self.previous_ship_counts, ship_counts)
+            
             # Flatten ship data and calculate totals
             ship_list = []
             group_totals = {}
             total_ships = 0
             
+            # Current ships
             for group_name, ships_in_group in ship_counts.items():
                 group_total = sum(ships_in_group.values())
                 group_totals[group_name] = group_total
                 total_ships += group_total
                 
                 for ship_name, count in ships_in_group.items():
-                    ship_list.append((ship_name, count))
+                    diff = ship_diffs.get(ship_name, 0)
+                    ship_list.append((ship_name, count, diff))
             
-            # Sort ships by count (descending)
-            ship_list.sort(key=lambda x: x[1], reverse=True)
+            # Add ships that disappeared (show as 0 count) - only for current scan
+            if self.is_diff_mode and self.previous_ship_counts:
+                for group_name, ships_in_group in self.previous_ship_counts.items():
+                    for ship_name, prev_count in ships_in_group.items():
+                        # Only show if ship is not in current scan at all
+                        found_in_current = False
+                        for curr_group, curr_ships in ship_counts.items():
+                            if ship_name in curr_ships:
+                                found_in_current = True
+                                break
+                        
+                        if not found_in_current:
+                            ship_list.append((ship_name, 0, -prev_count))
+            
+            # Sort ships by count (descending), zero counts go last
+            ship_list.sort(key=lambda x: (x[1] == 0, -x[1]))
             
             # Sort groups by count (descending)
             sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
@@ -556,17 +601,24 @@ class DScanAnalyzer:
             remaining_time = max(0, self.display_duration - (time.time() - self.result_start_time)
                                  ) if self.result_start_time else self.display_duration
             
-            # Build display lines
-            header_text = f"D-Scan | Total Ships: {total_ships} | Timeout: {remaining_time:.0f}s"
+            # Build display lines with diff info
+            mode_text = " " if self.is_diff_mode else ""
+            header_text = f"D-Scan{mode_text} | Total Ships: {total_ships} | Timeout: {remaining_time:.0f}s"
             left_lines = [header_text, ""]
-            for ship_name, count in ship_list:
-                left_lines.append(f"{ship_name}: {count}")
+            
+            for ship_name, count, diff in ship_list:
+                if diff > 0:
+                    left_lines.append(f"{ship_name}: {count} (+{diff})")
+                elif diff < 0:
+                    left_lines.append(f"{ship_name}: {count} ({diff})")
+                else:
+                    left_lines.append(f"{ship_name}: {count}")
             
             right_lines = ["Ship Categories:", ""]
             for group_name, count in sorted_groups:
                 right_lines.append(f"{group_name}: {count}")
             
-            # Calculate column widths
+            # Calculate text dimensions
             left_text = '\n'.join(left_lines)
             right_text = '\n'.join(right_lines)
             
@@ -582,10 +634,8 @@ class DScanAnalyzer:
             
             im = np.full((total_h, total_w, 3), C.dscan.transparency_color, np.uint8)
             
-            # Draw left column
-            utils.draw_text_withnewline(
-                im, left_text, (20, 20), color=(255, 255, 255), bg_color=self.bg_color,
-                font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            # Draw left column with color coding
+            self.draw_dscan_text_with_colors(im, left_lines, ship_list, (20, 20))
             
             # Draw right column
             right_x = left_w + padding * 2
@@ -598,6 +648,47 @@ class DScanAnalyzer:
         except Exception as e:
             logger.log(f"Error creating dscan display: {e}")
             return None
+
+    def calculate_ship_diffs(self, prev_counts, curr_counts):
+        """Calculate differences between previous and current ship counts"""
+        diffs = {}
+        
+        # Check all current ships
+        for group_name, ships_in_group in curr_counts.items():
+            for ship_name, curr_count in ships_in_group.items():
+                prev_count = 0
+                if group_name in prev_counts and ship_name in prev_counts[group_name]:
+                    prev_count = prev_counts[group_name][ship_name]
+                
+                diff = curr_count - prev_count
+                if diff != 0:
+                    diffs[ship_name] = diff
+        
+        return diffs
+
+    def draw_dscan_text_with_colors(self, im, text_lines, ship_data, pos):
+        """Draw dscan text with color coding for diffs"""
+        x, y = pos
+        
+        for i, line in enumerate(text_lines):
+            if i < 2:  # Header lines
+                color = (255, 255, 255)
+            elif i - 2 < len(ship_data):
+                ship_name, count, diff = ship_data[i - 2]
+                if count == 0 and diff < 0:
+                    color = (0, 0, 255)  # Red for removed ships
+                elif diff > 0:
+                    color = (0, 255, 0)  # Green for additions
+                elif diff < 0:
+                    color = (0, 0, 255)  # Red for removals
+                else:
+                    color = (255, 255, 255)  # White for unchanged
+            else:
+                color = (255, 255, 255)
+            
+            y = utils.draw_text_withnewline(
+                im, line, (x, y), color=color, bg_color=self.bg_color,
+                font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
 
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
