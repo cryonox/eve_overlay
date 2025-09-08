@@ -13,6 +13,7 @@ from global_hotkeys import register_hotkeys, start_checking_hotkeys
 import webbrowser
 from bidict import bidict
 from logger import logger
+import json
 
 
 async def get_zkill_data_async(session, char_id, max_retries=3):
@@ -148,7 +149,7 @@ class DScanAnalyzer:
             logger.log(f"Error reading clipboard: {e}")
             return None
 
-    async def parse_dscan(self, dscan_data):
+    async def parse_local(self, dscan_data):
         try:
             lines = dscan_data.strip().split('\n')
             char_names = []
@@ -200,6 +201,59 @@ class DScanAnalyzer:
                     self.handle_transparency()
 
         except Exception as e:
+            logger.log(f"Error parsing local: {e}")
+            return None
+
+    async def parse_dscan(self, dscan_data):
+        try:
+            # Load ship data
+            with open('ships.json', 'r') as f:
+                ships = json.load(f)
+            
+            lines = dscan_data.strip().split('\n')
+            ship_counts = {}
+            
+            for line in lines:
+                parts = line.split('\t')
+                if len(parts) >= 3:
+                    ship_name = parts[2].strip()
+                    
+                    # Handle ship names with pilot info (e.g., "Venture - Pilot Name")
+                    if ' - ' in ship_name:
+                        ship_name = ship_name.split(' - ')[0].strip()
+                    
+                    # Skip non-ship items
+                    if ship_name not in ships:
+                        continue
+                    
+                    ship_info = ships[ship_name]
+                    group_name = ship_info['group_name']
+                    
+                    if group_name not in ship_counts:
+                        ship_counts[group_name] = {}
+                    
+                    if ship_name not in ship_counts[group_name]:
+                        ship_counts[group_name][ship_name] = 0
+                    
+                    ship_counts[group_name][ship_name] += 1
+            
+            if not ship_counts:
+                self.show_status("No ships found in dscan")
+                return
+            
+            self.result_start_time = time.time()
+            self.last_ship_counts = ship_counts
+            
+            # Create display
+            im = self.create_dscan_display(ship_counts)
+            if im is not None:
+                self.last_result_im = im
+                self.last_im = im
+                cv2.imshow(self.win_name, im)
+                cv2.waitKey(1)
+                self.handle_transparency()
+                
+        except Exception as e:
             logger.log(f"Error parsing dscan: {e}")
             return None
 
@@ -210,11 +264,11 @@ class DScanAnalyzer:
             is_dscan = any('\t' in line for line in lines[:5])
 
             if is_dscan:
-                logger.log('dscan detected. not implemented yet')
-            else:
                 return asyncio.run(self.parse_dscan(clipboard_data))
+            else:
+                return asyncio.run(self.parse_local(clipboard_data))
         except Exception as e:
-            logger.log(f"Error parsing dscan: {e}")
+            logger.log(f"Error parsing clipboard: {e}")
             return None
 
     async def process_names_esi(self, char_names):
@@ -477,6 +531,74 @@ class DScanAnalyzer:
 
         return im
 
+    def create_dscan_display(self, ship_counts):
+        try:
+            # Flatten ship data and calculate totals
+            ship_list = []
+            group_totals = {}
+            total_ships = 0
+            
+            for group_name, ships_in_group in ship_counts.items():
+                group_total = sum(ships_in_group.values())
+                group_totals[group_name] = group_total
+                total_ships += group_total
+                
+                for ship_name, count in ships_in_group.items():
+                    ship_list.append((ship_name, count))
+            
+            # Sort ships by count (descending)
+            ship_list.sort(key=lambda x: x[1], reverse=True)
+            
+            # Sort groups by count (descending)
+            sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
+            
+            # Calculate remaining time
+            remaining_time = max(0, self.display_duration - (time.time() - self.result_start_time)
+                                 ) if self.result_start_time else self.display_duration
+            
+            # Build display lines
+            header_text = f"D-Scan | Total Ships: {total_ships} | Timeout: {remaining_time:.0f}s"
+            left_lines = [header_text, ""]
+            for ship_name, count in ship_list:
+                left_lines.append(f"{ship_name}: {count}")
+            
+            right_lines = ["Ship Categories:", ""]
+            for group_name, count in sorted_groups:
+                right_lines.append(f"{group_name}: {count}")
+            
+            # Calculate column widths
+            left_text = '\n'.join(left_lines)
+            right_text = '\n'.join(right_lines)
+            
+            left_w, left_h = utils.get_text_size_withnewline(
+                left_text, (20, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            right_w, right_h = utils.get_text_size_withnewline(
+                right_text, (20, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            
+            # Create image with both columns
+            padding = 20
+            total_w = left_w + right_w + padding * 3
+            total_h = max(left_h, right_h) + 40
+            
+            im = np.full((total_h, total_w, 3), C.dscan.transparency_color, np.uint8)
+            
+            # Draw left column
+            utils.draw_text_withnewline(
+                im, left_text, (20, 20), color=(255, 255, 255), bg_color=self.bg_color,
+                font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            
+            # Draw right column
+            right_x = left_w + padding * 2
+            utils.draw_text_withnewline(
+                im, right_text, (right_x, 20), color=(255, 255, 255), bg_color=self.bg_color,
+                font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            
+            return im
+            
+        except Exception as e:
+            logger.log(f"Error creating dscan display: {e}")
+            return None
+
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             for char_name, (rect, zkill_link) in self.char_rects.items():
@@ -516,6 +638,12 @@ class DScanAnalyzer:
                     else:
                         im = None
 
+                    if im is not None:
+                        cv2.imshow(self.win_name, im)
+                
+                # Update dscan display with countdown
+                if self.result_start_time and hasattr(self, 'last_ship_counts'):
+                    im = self.create_dscan_display(self.last_ship_counts)
                     if im is not None:
                         cv2.imshow(self.win_name, im)
 
