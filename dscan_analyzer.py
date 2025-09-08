@@ -66,6 +66,7 @@ class DScanAnalyzer:
         self.ignore_alliances = C.dscan.get('ignore_alliances', [])
         self.ignore_corps = C.dscan.get('ignore_corps', [])
         self.display_duration = C.dscan.get('timeout', 30)
+        self.zkill_limit = C.dscan.get('zkill_limit', 50)
         self.win_name = "D-Scan Analysis"
         self.transparency_on = C.dscan.get('transparency_on', True)
         self.transparency = C.dscan.get('transparency', 180)
@@ -211,6 +212,7 @@ class DScanAnalyzer:
 
     async def parse_dscan(self, dscan_data):
         try:
+            
             # Load ship data
             with open('ships.json', 'r') as f:
                 ships = json.load(f)
@@ -299,22 +301,36 @@ class DScanAnalyzer:
         try:
             result = await self.resolve_names_to_ids_esi(char_names)
 
-            # Fetch zkill data for all characters
-            utils.tick()
-            connector = aiohttp.TCPConnector(limit=200)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                zkill_tasks = [self.get_zkill_data_cached(
-                    session, char['char_id']) for char in result]
-                zkill_results = await asyncio.gather(*zkill_tasks)
+            # Check if we should skip zkill due to limit
+            skip_zkill = len(result) > self.zkill_limit
+            
+            if skip_zkill:
+                logger.log(f"Skipping zkill lookup for {len(result)} characters (limit: {self.zkill_limit})")
+                # Force aggregate mode when skipping zkill
+                if not self.aggregated_mode:
+                    self.aggregated_mode = True
+                    self.mode_changed = True
+                    logger.log("Automatically switched to aggregate mode due to zkill limit")
+            else:
+                # Fetch zkill data for all characters
+                utils.tick()
+                connector = aiohttp.TCPConnector(limit=200)
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    zkill_tasks = [self.get_zkill_data_cached(
+                        session, char['char_id']) for char in result]
+                    zkill_results = await asyncio.gather(*zkill_tasks)
 
-            all_results = [(char, zkill_data) for char, zkill_data in zip(result, zkill_results)]
-            utils.tock('zkill work')
+                all_results = [(char, zkill_data) for char, zkill_data in zip(result, zkill_results)]
+                utils.tock('zkill work')
 
-            # Get corp/alliance info for chars not on zkill
+            # Get corp/alliance info for chars not on zkill or when skipping zkill
             chars_needing_esi = []
-            for char, zkill_data in all_results:
-                if zkill_data is None or (isinstance(zkill_data, dict) and 'error' in zkill_data):
-                    chars_needing_esi.append(char['char_id'])
+            if skip_zkill:
+                chars_needing_esi = [char['char_id'] for char in result]
+            else:
+                for char, zkill_data in all_results:
+                    if zkill_data is None or (isinstance(zkill_data, dict) and 'error' in zkill_data):
+                        chars_needing_esi.append(char['char_id'])
 
             esi_char_info = {}
             if chars_needing_esi:
@@ -322,20 +338,33 @@ class DScanAnalyzer:
 
             corp_ids = []
             alliance_ids = []
-            for char, zkill_data in all_results:
-                if zkill_data and zkill_data.get('info') and 'error' not in zkill_data:
-                    corp_id = zkill_data['info'].get('corporationID')
-                    alliance_id = zkill_data['info'].get('allianceID')
-                else:
-                    # Use ESI data for chars not on zkill or with errors
+            
+            if skip_zkill:
+                # Use only ESI data
+                for char in result:
                     char_info = esi_char_info.get(char['char_id'], {})
                     corp_id = char_info.get('corporation_id')
                     alliance_id = char_info.get('alliance_id')
-                
-                if corp_id:
-                    corp_ids.append(corp_id)
-                if alliance_id:
-                    alliance_ids.append(alliance_id)
+                    
+                    if corp_id:
+                        corp_ids.append(corp_id)
+                    if alliance_id:
+                        alliance_ids.append(alliance_id)
+            else:
+                # Use zkill data where available, ESI otherwise
+                for char, zkill_data in all_results:
+                    if zkill_data and zkill_data.get('info') and 'error' not in zkill_data:
+                        corp_id = zkill_data['info'].get('corporationID')
+                        alliance_id = zkill_data['info'].get('allianceID')
+                    else:
+                        char_info = esi_char_info.get(char['char_id'], {})
+                        corp_id = char_info.get('corporation_id')
+                        alliance_id = char_info.get('alliance_id')
+                    
+                    if corp_id:
+                        corp_ids.append(corp_id)
+                    if alliance_id:
+                        alliance_ids.append(alliance_id)
 
             id_to_name = await self.ids_to_names_esi(corp_ids, alliance_ids)
             tickers = await self.get_corp_alliance_tickers(corp_ids, alliance_ids)
@@ -344,27 +373,49 @@ class DScanAnalyzer:
             logger.log(f'Resolved tickers: {len(tickers)} entries')
 
             char_data_list = []
-            for char, zkill_data in all_results:
-                if zkill_data and zkill_data.get('info'):
-                    corp_id = zkill_data['info'].get('corporationID')
-                    alliance_id = zkill_data['info'].get('allianceID')
-                else:
+            
+            if skip_zkill:
+                # Build char data without zkill info
+                for char in result:
                     char_info = esi_char_info.get(char['char_id'], {})
                     corp_id = char_info.get('corporation_id')
                     alliance_id = char_info.get('alliance_id')
 
-                char_info = {
-                    'char_name': char['char_name'],
-                    'char_id': char['char_id'],
-                    'corp_id': corp_id,
-                    'alliance_id': alliance_id,
-                    'corp_name': id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown',
-                    'alliance_name': id_to_name.get(alliance_id) if alliance_id else None,
-                    'corp_ticker': tickers.get(corp_id, {}).get('ticker') if corp_id else None,
-                    'alliance_ticker': tickers.get(alliance_id, {}).get('ticker') if alliance_id else None,
-                    'zkill_link': f"https://zkillboard.com/character/{char['char_id']}/"
-                }
-                char_data_list.append(char_info)
+                    char_data = {
+                        'char_name': char['char_name'],
+                        'char_id': char['char_id'],
+                        'corp_id': corp_id,
+                        'alliance_id': alliance_id,
+                        'corp_name': id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown',
+                        'alliance_name': id_to_name.get(alliance_id) if alliance_id else None,
+                        'corp_ticker': tickers.get(corp_id, {}).get('ticker') if corp_id else None,
+                        'alliance_ticker': tickers.get(alliance_id, {}).get('ticker') if alliance_id else None,
+                        'zkill_link': f"https://zkillboard.com/character/{char['char_id']}/"
+                    }
+                    char_data_list.append(char_data)
+            else:
+                # Build char data with zkill info
+                for char, zkill_data in all_results:
+                    if zkill_data and zkill_data.get('info'):
+                        corp_id = zkill_data['info'].get('corporationID')
+                        alliance_id = zkill_data['info'].get('allianceID')
+                    else:
+                        char_info = esi_char_info.get(char['char_id'], {})
+                        corp_id = char_info.get('corporation_id')
+                        alliance_id = char_info.get('alliance_id')
+
+                    char_data = {
+                        'char_name': char['char_name'],
+                        'char_id': char['char_id'],
+                        'corp_id': corp_id,
+                        'alliance_id': alliance_id,
+                        'corp_name': id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown',
+                        'alliance_name': id_to_name.get(alliance_id) if alliance_id else None,
+                        'corp_ticker': tickers.get(corp_id, {}).get('ticker') if corp_id else None,
+                        'alliance_ticker': tickers.get(alliance_id, {}).get('ticker') if alliance_id else None,
+                        'zkill_link': f"https://zkillboard.com/character/{char['char_id']}/"
+                    }
+                    char_data_list.append(char_data)
 
             return char_data_list
         except Exception as e:
@@ -558,8 +609,10 @@ class DScanAnalyzer:
     def create_dscan_display(self, ship_counts):
         try:
             # Calculate ship diffs if in diff mode
+            if ship_counts is None:
+                return None
             ship_diffs = {}
-            if self.is_diff_mode and self.previous_ship_counts:
+            if self.is_diff_mode and self.previous_ship_counts is not None:
                 ship_diffs = self.calculate_ship_diffs(self.previous_ship_counts, ship_counts)
             
             # Flatten ship data and calculate totals
@@ -578,7 +631,7 @@ class DScanAnalyzer:
                     ship_list.append((ship_name, count, diff))
             
             # Add ships that disappeared (show as 0 count) - only for current scan
-            if self.is_diff_mode and self.previous_ship_counts:
+            if self.is_diff_mode and self.previous_ship_counts is not None:
                 for group_name, ships_in_group in self.previous_ship_counts.items():
                     for ship_name, prev_count in ships_in_group.items():
                         # Only show if ship is not in current scan at all
@@ -700,9 +753,8 @@ class DScanAnalyzer:
 
     def monitor_clipboard(self):
         print("Press Ctrl+C to exit\n")
-
         last_clipboard = ""
-
+        
         try:
             while True:
                 current_clipboard = self.get_clipboard_data()
@@ -718,26 +770,23 @@ class DScanAnalyzer:
                     self.show_status("")
                     self.result_start_time = None
                     self.last_result_im = None
-
-                if self.result_start_time and hasattr(self, 'last_parsed_data'):
-                    if self.aggregated_mode:
-                        im = self.create_aggregated_display(
-                            self.last_parsed_data)
-                    elif hasattr(self, 'last_zkill_results'):
-                        im = self.create_display_image_from_processed_data(
-                            self.last_parsed_data, self.last_zkill_results)
-                    else:
-                        im = None
-
-                    if im is not None:
-                        cv2.imshow(self.win_name, im)
                 
-                # Update dscan display with countdown
-                if self.result_start_time and hasattr(self, 'last_ship_counts'):
-                    im = self.create_dscan_display(self.last_ship_counts)
-                    if im is not None:
-                        cv2.imshow(self.win_name, im)
-
+                # Single display update per loop
+                im_to_show = None
+                if self.result_start_time:
+                    if hasattr(self, 'last_ship_counts'):
+                        im_to_show = self.create_dscan_display(self.last_ship_counts)
+                    elif hasattr(self, 'last_parsed_data'):
+                        if self.aggregated_mode:
+                            im_to_show = self.create_aggregated_display(self.last_parsed_data)
+                        elif hasattr(self, 'last_zkill_results'):
+                            im_to_show = self.create_display_image_from_processed_data(
+                                self.last_parsed_data, self.last_zkill_results)
+                
+                if im_to_show is not None:
+                    cv2.imshow(self.win_name, im_to_show)
+                
+                # Handle mode changes
                 if self.mode_changed and hasattr(self, 'last_parsed_data'):
                     if self.aggregated_mode:
                         im = self.create_aggregated_display(
