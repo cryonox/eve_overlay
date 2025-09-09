@@ -756,6 +756,9 @@ class DScanAnalyzer:
                     self.show_status("")
                     self.result_start_time = None
                     self.last_result_im = None
+                    self.last_parsed_data = None
+                    self.last_zkill_results = None
+                    self.last_ship_counts = None
                 
                 # Single display update per loop
                 im_to_show = None
