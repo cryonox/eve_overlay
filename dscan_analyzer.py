@@ -82,7 +82,10 @@ class DScanAnalyzer:
         self.esi_char_cache = {}
         self.ticker_cache = {}
         self.aggregated_mode = False
-        self.mode_changed = False
+        self.is_local = False
+        self.is_dscan = False
+        self.last_parsed_data = None
+        self.last_zkill_results = None
         cv2.namedWindow(self.win_name, cv2.WINDOW_AUTOSIZE)
         cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
         cv2.setMouseCallback(self.win_name, self.mouse_callback)
@@ -106,7 +109,6 @@ class DScanAnalyzer:
 
         self.last_ship_counts = None
         self.previous_ship_counts = None
-        self.is_diff_mode = False
         self.last_dscan_time = None
 
     def toggle_transparency(self):
@@ -179,16 +181,7 @@ class DScanAnalyzer:
             self.result_start_time = time.time()
             self.last_parsed_data = filtered_data
 
-            if self.aggregated_mode:
-                im = self.create_aggregated_display(filtered_data)
-                if im is not None:
-                    self.last_result_im = im
-                    self.last_im = im
-                    cv2.imshow(self.win_name, im)
-                    cv2.waitKey(1)
-                    self.handle_transparency()
-            else:
-                # Use zkill data already fetched in process_names_esi
+            if not self.aggregated_mode:
                 zkill_results = []
                 for char_data in filtered_data:
                     char_id = char_data.get('char_id')
@@ -196,15 +189,6 @@ class DScanAnalyzer:
                     zkill_results.append(zkill_data)
                 
                 self.last_zkill_results = zkill_results
-
-                im = self.create_display_image_from_processed_data(
-                    filtered_data, zkill_results)
-                if im is not None:
-                    self.last_result_im = im
-                    self.last_im = im
-                    cv2.imshow(self.win_name, im)
-                    cv2.waitKey(1)
-                    self.handle_transparency()
 
         except Exception as e:
             logger.log(f"Error parsing local: {e}")
@@ -265,16 +249,6 @@ class DScanAnalyzer:
             self.result_start_time = time.time()
             self.last_dscan_time = current_time
             self.last_ship_counts = ship_counts
-            
-            # Create display
-            im = self.create_dscan_display(ship_counts)
-            if im is not None:
-                self.last_result_im = im
-                self.last_im = im
-                cv2.imshow(self.win_name, im)
-                cv2.waitKey(1)
-                self.handle_transparency()
-                
         except Exception as e:
             logger.log(f"Error parsing dscan: {e}")
             return None
@@ -284,14 +258,14 @@ class DScanAnalyzer:
             lines = clipboard_data.strip().split('\n')
 
             is_dscan = any('\t' in line for line in lines[:5])
-
+            self.is_dscan = is_dscan
+            self.is_local = not self.is_dscan
             if is_dscan:
                 return asyncio.run(self.parse_dscan(clipboard_data))
             else:
                 # Reset dscan state when switching to local
                 self.last_ship_counts = None
                 self.previous_ship_counts = None
-                self.is_diff_mode = False
                 return asyncio.run(self.parse_local(clipboard_data))
         except Exception as e:
             logger.log(f"Error parsing clipboard: {e}")
@@ -563,8 +537,7 @@ class DScanAnalyzer:
 
             corp_counts[corp_name] = corp_counts.get(corp_name, 0) + 1
             if alliance_name:
-                alliance_counts[alliance_name] = alliance_counts.get(
-                    alliance_name, 0) + 1
+                alliance_counts[alliance_name] = alliance_counts.get(alliance_name, 0) + 1
 
         remaining_time = max(0, self.display_duration - (time.time() - self.result_start_time)
                              ) if self.result_start_time else self.display_duration
@@ -575,32 +548,46 @@ class DScanAnalyzer:
         else:
             header_text = f"Aggregated | Pilots: {pilot_count} | Timeout: {remaining_time:.0f}s"
 
-        text_lines = [header_text, ""]
-
+        # Build left column (alliances)
+        left_lines = [header_text, "", "Alliances:"]
         if alliance_counts:
-            text_lines.append("Alliances:")
-            sorted_alliances = sorted(
-                alliance_counts.items(), key=lambda x: x[1], reverse=True)
+            sorted_alliances = sorted(alliance_counts.items(), key=lambda x: x[1], reverse=True)
             for alliance_name, count in sorted_alliances:
-                text_lines.append(f"  {alliance_name}: {count}")
+                left_lines.append(f"  {alliance_name}: {count}")
+        else:
+            left_lines.append("  None")
 
-        if corp_counts:
-            if alliance_counts:
-                text_lines.append("")
-            text_lines.append("Corporations:")
-            sorted_corps = sorted(corp_counts.items(),
-                                  key=lambda x: x[1], reverse=True)
-            for corp_name, count in sorted_corps:
-                text_lines.append(f"  {corp_name}: {count}")
+        # Build right column (corporations)
+        right_lines = ["", "", "Corporations:"]
+        sorted_corps = sorted(corp_counts.items(), key=lambda x: x[1], reverse=True)
+        for corp_name, count in sorted_corps:
+            right_lines.append(f"  {corp_name}: {count}")
 
-        full_text = '\n'.join(text_lines)
-        w, h = utils.get_text_size_withnewline(
-            full_text, (20, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        # Calculate text dimensions
+        left_text = '\n'.join(left_lines)
+        right_text = '\n'.join(right_lines)
+        
+        left_w, left_h = utils.get_text_size_withnewline(
+            left_text, (20, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        right_w, right_h = utils.get_text_size_withnewline(
+            right_text, (20, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
 
-        im = np.zeros((h, w, 3), dtype=np.uint8)
+        # Create image with both columns
+        padding = 20
+        total_w = left_w + right_w + padding * 3
+        total_h = max(left_h, right_h) + 40
+
+        im = np.zeros((total_h, total_w, 3), dtype=np.uint8)
         im[:] = C.dscan.transparency_color
 
-        utils.draw_text_withnewline(im, full_text, (10, 20), color=(255, 255, 255),
+        # Draw left column (alliances)
+        utils.draw_text_withnewline(im, left_text, (10, 20), color=(255, 255, 255),
+                                    bg_color=self.bg_color, font_scale=C.dscan.font_scale,
+                                    font_thickness=C.dscan.font_thickness)
+
+        # Draw right column (corporations)
+        right_x = left_w + padding * 2
+        utils.draw_text_withnewline(im, right_text, (right_x, 20), color=(255, 255, 255),
                                     bg_color=self.bg_color, font_scale=C.dscan.font_scale,
                                     font_thickness=C.dscan.font_thickness)
 
@@ -612,7 +599,7 @@ class DScanAnalyzer:
             if ship_counts is None:
                 return None
             ship_diffs = {}
-            if self.is_diff_mode and self.previous_ship_counts is not None:
+            if self.previous_ship_counts is not None:
                 ship_diffs = self.calculate_ship_diffs(self.previous_ship_counts, ship_counts)
             
             # Flatten ship data and calculate totals
@@ -631,7 +618,7 @@ class DScanAnalyzer:
                     ship_list.append((ship_name, count, diff))
             
             # Add ships that disappeared (show as 0 count) - only for current scan
-            if self.is_diff_mode and self.previous_ship_counts is not None:
+            if self.previous_ship_counts is not None:
                 for group_name, ships_in_group in self.previous_ship_counts.items():
                     for ship_name, prev_count in ships_in_group.items():
                         # Only show if ship is not in current scan at all
@@ -655,8 +642,7 @@ class DScanAnalyzer:
                                  ) if self.result_start_time else self.display_duration
             
             # Build display lines with diff info
-            mode_text = " " if self.is_diff_mode else ""
-            header_text = f"D-Scan{mode_text} | Total Ships: {total_ships} | Timeout: {remaining_time:.0f}s"
+            header_text = f"D-Scan | Total Ships: {total_ships} | Timeout: {remaining_time:.0f}s"
             left_lines = [header_text, ""]
             
             for ship_name, count, diff in ship_list:
@@ -773,37 +759,18 @@ class DScanAnalyzer:
                 
                 # Single display update per loop
                 im_to_show = None
-                if self.result_start_time:
-                    if hasattr(self, 'last_ship_counts'):
-                        im_to_show = self.create_dscan_display(self.last_ship_counts)
-                    elif hasattr(self, 'last_parsed_data'):
-                        if self.aggregated_mode:
-                            im_to_show = self.create_aggregated_display(self.last_parsed_data)
-                        elif hasattr(self, 'last_zkill_results'):
-                            im_to_show = self.create_display_image_from_processed_data(
-                                self.last_parsed_data, self.last_zkill_results)
-                
+                if self.is_local:
+                    if self.aggregated_mode:
+                        im_to_show = self.create_aggregated_display(self.last_parsed_data)
+                    else:
+                        im_to_show = self.create_display_image_from_processed_data(
+                            self.last_parsed_data, self.last_zkill_results)
+                if self.is_dscan:
+                    im_to_show = self.create_dscan_display(self.last_ship_counts)
                 if im_to_show is not None:
                     cv2.imshow(self.win_name, im_to_show)
-                
-                # Handle mode changes
-                if self.mode_changed and hasattr(self, 'last_parsed_data'):
-                    if self.aggregated_mode:
-                        im = self.create_aggregated_display(
-                            self.last_parsed_data)
-                    else:
-                        im = self.create_display_image_from_processed_data(
-                            self.last_parsed_data, getattr(self, 'last_zkill_results', None))
-                    if im is not None:
-                        self.last_result_im = im
-                        self.last_im = im
-                        cv2.imshow(self.win_name, im)
-                        # Reset timeout when switching modes
-                        if not self.result_start_time:
-                            self.result_start_time = time.time()
-                    self.mode_changed = False
-
-                cv2.waitKey(100)
+                self.last_result_im = im_to_show
+                cv2.waitKey(100) 
                 self.handle_transparency()
 
         except KeyboardInterrupt:

@@ -9,7 +9,7 @@ dscan:
   hotkey_mode: alt+shift+m
   ignore_alliances: []
   ignore_corps: []
-  timeout: 15
+  timeout: 10
   transparency: 180
   transparency_color: [64, 64, 64]
   transparency_on: true
