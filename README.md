@@ -8,3 +8,6 @@ This is meant to be a little bit faster and a little bit unobtrusive aid for day
 * `alt+shift+e` - clear cache
 
 The shortcut keys can be customized in the config.yaml file. 
+
+# Example usage
+[![Demo Video](https://img.youtube.com/vi/2stDs3LS6Qo/0.jpg)](https://www.youtube.com/watch?v=2stDs3LS6Qo)
