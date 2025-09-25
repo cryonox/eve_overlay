@@ -28,17 +28,6 @@ class CacheManager:
         trie_path = self.cache_dir / 'names.trie'
         ids_path = self.cache_dir / 'ids.bin'
         char_info_path = self.cache_dir / 'char_info.bin'
-        corp_mappings_path = self.cache_dir / 'corp_mappings.json'
-        alliance_mappings_path = self.cache_dir / 'alliance_mappings.json'
-        
-        # Load mappings
-        if corp_mappings_path.exists():
-            with open(corp_mappings_path, 'r') as f:
-                self._corp_id_to_name = {int(k): v for k, v in json.load(f).items()}
-        
-        if alliance_mappings_path.exists():
-            with open(alliance_mappings_path, 'r') as f:
-                self._alliance_id_to_name = {int(k): v for k, v in json.load(f).items()}
         
         if self._trie is None and trie_path.exists():
             print("  Loading trie...")
@@ -93,10 +82,23 @@ class CacheManager:
             print("  Building name mappings...")
             self._name2tid = {}
             self._tid2name = {}
+            self._corp_id_to_name = {}
+            self._alliance_id_to_name = {}
+            
             for tid in tqdm(range(len(self._trie)), desc="Building mappings"):
                 name = self._trie.restore_key(tid)
                 self._name2tid[name] = tid
                 self._tid2name[tid] = name
+                
+                if name.startswith('#'):
+                    corp_name = name[1:]
+                    corp_id = self._tid2id[tid]
+                    self._corp_id_to_name[corp_id] = corp_name
+                elif name.startswith('@'):
+                    alliance_name = name[1:]
+                    alliance_id = self._tid2id[tid]
+                    self._alliance_id_to_name[alliance_id] = alliance_name
+            
             print(f"  Name mappings built: {len(self._name2tid):,} total")
         
         self._cache_loaded = True
@@ -175,12 +177,6 @@ class CacheManager:
         # Store mappings
         self._corp_id_to_name = corp_id_to_name
         self._alliance_id_to_name = alliance_id_to_name
-        
-        # Save mappings to files
-        with open(self.cache_dir / 'corp_mappings.json', 'w') as f:
-            json.dump(corp_id_to_name, f)
-        with open(self.cache_dir / 'alliance_mappings.json', 'w') as f:
-            json.dump(alliance_id_to_name, f)
         
         print("Building trie...")
         trie = marisa_trie.Trie(names)
