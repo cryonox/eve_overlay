@@ -1,9 +1,11 @@
 import json
 import marisa_trie
 import leb128
+import io
 from pathlib import Path
 import utils
 from tqdm import tqdm
+import pdb
 
 class CacheManager:
     def __init__(self, cache_dir='test_data/char_data'):
@@ -46,36 +48,45 @@ class CacheManager:
         
         if self._tid2id is None and ids_path.exists():
             print("  Loading IDs...")
-            self._tid2id = []
             with open(ids_path, 'rb') as f:
-                with tqdm(desc="Loading IDs", unit="entries") as pbar:
-                    while True:
-                        try:
-                            id_val, _ = leb128.i.decode_reader(f)
-                            self._tid2id.append(id_val)
-                            pbar.update(1)
-                        except:
-                            break
+                data = f.read()
+            
+            self._tid2id = []
+            bio = io.BytesIO(data)
+            expected_count = len(self._trie) if self._trie else 0
+            with tqdm(desc="Loading IDs", total=expected_count, unit="entries") as pbar:
+                while bio.tell() < len(data):
+                    try:
+                        id_val, consumed = leb128.i.decode_reader(bio)
+                        self._tid2id.append(id_val)
+                        pbar.update(1)
+                    except:
+                        break
             print(f"  IDs loaded: {len(self._tid2id):,} total")
         
         if self._char_info is None and char_info_path.exists():
             print("  Loading char info...")
-            self._char_info = [None] * len(self._trie) if self._trie else []
             with open(char_info_path, 'rb') as f:
-                with tqdm(desc="Loading char info", unit="entries") as pbar:
-                    idx = 0
-                    while True:
-                        try:
-                            corp_id, _ = leb128.i.decode_reader(f)
-                            alliance_id, _ = leb128.i.decode_reader(f)
-                            if corp_id == 0:
-                                self._char_info[idx] = None
-                            else:
-                                self._char_info[idx] = (corp_id, alliance_id)
-                            idx += 1
-                            pbar.update(1)
-                        except:
-                            break
+                data = f.read()
+            
+            self._char_info = [None] * len(self._trie) if self._trie else []
+            bio = io.BytesIO(data)
+            idx = 0
+            expected_count = len(self._trie) if self._trie else 0
+            with tqdm(desc="Loading char info", total=expected_count, unit="entries") as pbar:
+                while bio.tell() < len(data) and idx < len(self._char_info):
+                    try:
+                        corp_id, _ = leb128.i.decode_reader(bio)
+                        alliance_id, _ = leb128.i.decode_reader(bio)
+                        
+                        if corp_id == 0:
+                            self._char_info[idx] = None
+                        else:
+                            self._char_info[idx] = (corp_id, alliance_id)
+                        idx += 1
+                        pbar.update(1)
+                    except:
+                        break
             print(f"  Char info loaded: {len(self._char_info):,} total")
         
         if self._name2tid is None and self._trie:
@@ -303,7 +314,7 @@ if __name__ == "__main__":
     import time
     
     cache = CacheManager()
-    cache.build_cache()
+    #cache.build_cache()
     
     #print("\n" + "="*50)
     #cache.test_cache()
@@ -325,3 +336,5 @@ if __name__ == "__main__":
         print(f"Char ID: {info['char_id']}")
         print(f"Corp: {info['corp_name']} ({info['corp_id']})")
         print(f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
+
+    #pdb.set_trace() 
