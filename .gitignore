@@ -3,3 +3,5 @@ build
 .pixi
 *.pyc
 config.private.yaml
+test_data/
+.augment-guidelines

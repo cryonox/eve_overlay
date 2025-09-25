@@ -17,17 +17,21 @@ import time
 import math
 from logger import logger
 
+timer_trackers = {}
 
-def tick():
-    global timer_start
-    timer_start = time.perf_counter_ns()
+def tick(name='default'):
+    global timer_trackers
+    timer_trackers[name] = time.perf_counter_ns()
 
 
-def tock(description=''):
-    dur = (time.perf_counter_ns()-timer_start)/1000/1000
-    if description:
-        logger.log(f'{description} = {dur} ms')
-        return dur
+def tock(name='default'):
+    global timer_trackers
+    if name not in timer_trackers:
+        return 0
+    
+    dur = (time.perf_counter_ns() - timer_trackers[name]) / 1000 / 1000
+    if name != 'default':
+        logger.log(f'{name} = {dur} ms')
     return dur
 
 
