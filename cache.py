@@ -6,6 +6,7 @@ from pathlib import Path
 import utils
 from tqdm import tqdm
 import pdb
+import struct
 
 class CacheManager:
     def __init__(self, cache_dir='test_data/char_data'):
@@ -20,7 +21,7 @@ class CacheManager:
         self._alliance_id_to_name = None
         self._cache_loaded = False
         
-    def _load_cache(self):
+    def load_cache(self):
         if self._cache_loaded:
             return
         
@@ -43,14 +44,13 @@ class CacheManager:
             self._tid2id = []
             bio = io.BytesIO(data)
             expected_count = len(self._trie) if self._trie else 0
-            with tqdm(desc="Loading IDs", total=expected_count, unit="entries") as pbar:
-                while bio.tell() < len(data):
-                    try:
-                        id_val, consumed = leb128.i.decode_reader(bio)
-                        self._tid2id.append(id_val)
-                        pbar.update(1)
-                    except:
-                        break
+            
+            while bio.tell() < len(data):
+                try:
+                    id_val, consumed = leb128.i.decode_reader(bio)
+                    self._tid2id.append(id_val)
+                except:
+                    break
             print(f"  IDs loaded: {len(self._tid2id):,} total")
         
         if self._char_info is None and char_info_path.exists():
@@ -58,24 +58,21 @@ class CacheManager:
             with open(char_info_path, 'rb') as f:
                 data = f.read()
             
-            self._char_info = [None] * len(self._trie) if self._trie else []
+            self._char_info = []
             bio = io.BytesIO(data)
-            idx = 0
             expected_count = len(self._trie) if self._trie else 0
-            with tqdm(desc="Loading char info", total=expected_count, unit="entries") as pbar:
-                while bio.tell() < len(data) and idx < len(self._char_info):
-                    try:
-                        corp_id, _ = leb128.i.decode_reader(bio)
-                        alliance_id, _ = leb128.i.decode_reader(bio)
-                        
-                        if corp_id == 0:
-                            self._char_info[idx] = None
-                        else:
-                            self._char_info[idx] = (corp_id, alliance_id)
-                        idx += 1
-                        pbar.update(1)
-                    except:
-                        break
+            
+            while bio.tell() < len(data):
+                try:
+                    corp_id, _ = leb128.i.decode_reader(bio)
+                    alliance_id, _ = leb128.i.decode_reader(bio)
+                    
+                    if corp_id == 0:
+                        self._char_info.append(None)
+                    else:
+                        self._char_info.append((corp_id, alliance_id))
+                except:
+                    break
             print(f"  Char info loaded: {len(self._char_info):,} total")
         
         if self._name2tid is None and self._trie:
@@ -85,7 +82,7 @@ class CacheManager:
             self._corp_id_to_name = {}
             self._alliance_id_to_name = {}
             
-            for tid in tqdm(range(len(self._trie)), desc="Building mappings"):
+            for tid in range(len(self._trie)):
                 name = self._trie.restore_key(tid)
                 self._name2tid[name] = tid
                 self._tid2name[tid] = name
@@ -278,9 +275,6 @@ class CacheManager:
         return errors == 0
 
     def get_char_info(self, char_name):
-        utils.tick('cache_load')
-        self._load_cache()
-        utils.tock('cache_load')
         
         tid = self.get_tid(char_name)
         if tid is None:
@@ -311,6 +305,7 @@ if __name__ == "__main__":
     
     cache = CacheManager()
     #cache.build_cache()
+    cache.load_cache()
     
     #print("\n" + "="*50)
     #cache.test_cache()

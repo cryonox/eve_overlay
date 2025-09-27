@@ -46,6 +46,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/d3/de/8c07714cd55c72e57a44059aaba43bd1b347e989b18a19012ad4764978a8/global_hotkeys-0.1.7.tar.gz
       - pypi: https://files.pythonhosted.org/packages/76/c6/c88e154df9c4e1a2a66ccf0005a88dfb2650c1dffb6f5ce603dfbd452ce3/idna-3.10-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dd/9d/21c2baa41ac3aa762bcbb66a7a9f00b7857489fe7531a2e7d35df262da94/inflate64-1.0.3-cp313-cp313-win_amd64.whl
+      - pypi: https://files.pythonhosted.org/packages/4a/4a/cf14bf3b1f5ffb13c69cf5f0ea78031247790558ee88984a8bdd22fae60d/kaitaistruct-0.11-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/55/88/287159903c5b3fc6d47b651c7ab65a54dcf9c9916de546188a7f62870d6d/keyboard-0.13.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/75/bd/f1a5d894000941739f2ae1b65a32892349423ad49c2e6d0771d0bad3fae4/kiwisolver-1.4.9-cp313-cp313-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/09/97/45ab4bab1a89e6fdbc822f818bb18b39eed0dd7ed1faac8b89bc6b49a9ed/leb128-1.0.8-py3-none-any.whl
@@ -338,6 +339,13 @@ packages:
   - readme-renderer ; extra == 'check'
   - twine ; extra == 'check'
   requires_python: '>=3.9,<3.14'
+- pypi: https://files.pythonhosted.org/packages/4a/4a/cf14bf3b1f5ffb13c69cf5f0ea78031247790558ee88984a8bdd22fae60d/kaitaistruct-0.11-py2.py3-none-any.whl
+  name: kaitaistruct
+  version: '0.11'
+  sha256: 5c6ce79177b4e193a577ecd359e26516d1d6d000a0bffd6e1010f2a46a62a561
+  requires_dist:
+  - enum34 ; python_full_version < '3.4'
+  requires_python: '>=2.7,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*'
 - pypi: https://files.pythonhosted.org/packages/55/88/287159903c5b3fc6d47b651c7ab65a54dcf9c9916de546188a7f62870d6d/keyboard-0.13.5-py3-none-any.whl
   name: keyboard
   version: 0.13.5

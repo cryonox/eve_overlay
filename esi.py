@@ -62,3 +62,67 @@ class ESIClient:
         except Exception as e:
             print(f"Error resolving IDs: {e}")
             return {}
+
+    async def names_to_ids(self, names):
+        """Convert list of names to IDs using ESI"""
+        if not names:
+            return {}
+        
+        names = [name for name in names if name and name.strip()]
+        if not names:
+            return {}
+        
+        cached_res = {}
+        uncached_names = []
+        
+        for name in names:
+            cached_id = None
+            for id, cached_name in self.name_cache.items():
+                if cached_name == name:
+                    cached_id = id
+                    break
+            
+            if cached_id:
+                cached_res[name] = cached_id
+            else:
+                uncached_names.append(name)
+        
+        if not uncached_names:
+            return cached_res
+        
+        all_res = cached_res.copy()
+        chunk_size = 500
+        
+        async with aiohttp.ClientSession() as session:
+            for i in range(0, len(uncached_names), chunk_size):
+                chunk = uncached_names[i:i + chunk_size]
+                chunk_res = await self._resolve_names_batch(session, chunk)
+                
+                for name, char_id in chunk_res.items():
+                    self.name_cache[char_id] = name
+                
+                all_res.update(chunk_res)
+        
+        return all_res
+
+    async def _resolve_names_batch(self, session, names):
+        """Resolve batch of names to IDs"""
+        if not names:
+            return {}
+        
+        url = "https://esi.evetech.net/latest/universe/ids/"
+        print(f"Sending {len(names)} names to ESI: {names[:5]}...")  # Debug
+        
+        try:
+            async with session.post(url, json=names, timeout=30) as response:
+                if response.status != 200:
+                    print(f"ESI error: {response.status}")
+                    response_text = await response.text()
+                    print(f"Response: {response_text}")
+                    return {}
+                
+                data = await response.json()
+                return {char['name']: char['id'] for char in data.get('characters', [])}
+        except Exception as e:
+            print(f"Error resolving names: {e}")
+            return {}
