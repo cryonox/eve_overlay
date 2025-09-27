@@ -7,6 +7,7 @@ import utils
 from tqdm import tqdm
 import pdb
 import struct
+import pickle
 
 class CacheManager:
     def __init__(self, cache_dir='test_data/char_data'):
@@ -26,14 +27,13 @@ class CacheManager:
             return
         
         print("Loading cache...")
-        trie_path = self.cache_dir / 'names.trie'
+        trie_path = self.cache_dir / 'names.pkl'
         ids_path = self.cache_dir / 'ids.bin'
         char_info_path = self.cache_dir / 'char_info.bin'
         
         if self._trie is None and trie_path.exists():
             print("  Loading trie...")
-            self._trie = marisa_trie.Trie()
-            self._trie.load(str(trie_path))
+            self._trie = self.load_trie_pickle(trie_path)
             print(f"  Trie loaded: {len(self._trie):,} entries")
         
         if self._tid2id is None and ids_path.exists():
@@ -188,11 +188,11 @@ class CacheManager:
             ordered_char_info[trie_id] = char_info
         
         print("Writing files...")
-        trie_path = self.cache_dir / 'names.trie'
+        trie_path = self.cache_dir / 'names.pkl'
         ids_path = self.cache_dir / 'ids.bin'
         char_info_path = self.cache_dir / 'char_info.bin'
         
-        trie.save(str(trie_path))
+        self.save_trie_pickle(trie, trie_path)
         
         with open(ids_path, 'wb') as f:
             for id_val in tqdm(ordered_ids, desc="Writing IDs"):
@@ -300,11 +300,19 @@ class CacheManager:
             'alliance_name': alliance_name
         }
 
+    def save_trie_pickle(self, trie, fpath):
+        with open(fpath, 'wb') as f:
+            pickle.dump(trie, f)
+
+    def load_trie_pickle(self, fpath):
+        with open(fpath, 'rb') as f:
+            return pickle.load(f)
+
 if __name__ == "__main__":
     import time
     
     cache = CacheManager()
-    #cache.build_cache()
+    cache.build_cache()
     cache.load_cache()
     
     #print("\n" + "="*50)
