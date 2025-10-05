@@ -86,7 +86,6 @@ def clear_bit(value, bit):
 
 
 def win_transparent(wclass=None, title='', transparency=80, color_key=(0, 0, 0)):
-
     try:
         hwnd = win32gui.FindWindow(wclass, title)
 
@@ -115,55 +114,69 @@ def get_ch_con():
 
 
 def draw_text_withnewline(im, text_orig, pos=(0, 0), color=(0, 255, 0), bg_color=(0, 0, 0), font_scale=0.7, font_thickness=None):
-    text_color = (0, 255, 0)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    # font thickness should be a function of font_scale
-    # such that when font_scale is 0.7 fontthickness is 2
     if font_thickness is None:
         font_thickness = math.ceil(2 * font_scale)
 
     x, y = pos
-
-    for i, text in enumerate(text_orig.split('\n')):
-        text_size, base_line = cv2.getTextSize(
-            text, font, font_scale, font_thickness)
+    start_x, start_y = x, y
+    max_w = 0
+    lines = text_orig.split('\n')
+    
+    if not lines:
+        return (x, y, x, y)
+    
+    first_text_size, first_baseline = cv2.getTextSize(lines[0], font, font_scale, font_thickness)
+    current_y = y + first_text_size[1]
+    final_y = current_y
+    
+    for text in lines:
+        text_size, baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
         text_w, text_h = text_size
-        cv2.rectangle(im, (x, y-base_line*3), (x+text_w, y +
-                                               text_h-base_line), bg_color, -1)
-        cv2.putText(im, text, (x, y), font, font_scale,
-                    color, font_thickness, cv2.LINE_AA)
-        y += text_h+base_line*2
-    return y
+        
+        cv2.rectangle(im, (x, current_y-text_h), (x+text_w, current_y+baseline), bg_color, -1)
+        cv2.putText(im, text, (x, current_y), font, font_scale, color, font_thickness, cv2.LINE_AA)
+        
+        max_w = max(max_w, text_w)
+        final_y = current_y + baseline
+        current_y += text_h + baseline
+    
+    return (start_x, start_y, start_x + max_w, final_y)
 
 
-def draw_text(self, im, text, pos=(0, 0), color=(0, 255, 0)):
-    text_color = (0, 255, 0)
+def draw_text(im, text, pos=(0, 0), color=(0, 255, 0), bg_color=(0, 0, 0), font_scale=0.7, font_thickness=2):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.7
-    font_thickness = 2
-
+    
     x, y = pos
-    text_size, base_line = cv2.getTextSize(
-        text, font, font_scale, font_thickness)
+    text_size, baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
     text_w, text_h = text_size
-    cv2.rectangle(im, (x, y-base_line*3), (x+text_w, y +
-                                           text_h-base_line), self.c.bg_color, -1)
-    cv2.putText(im, text, pos, font, font_scale,
-                color, font_thickness, cv2.LINE_AA)
+    
+    text_y = y + text_h  # Move down by text height from top-left
+    cv2.rectangle(im, (x, y), (x+text_w, text_y+baseline), bg_color, -1)
+    cv2.putText(im, text, (x, text_y), font, font_scale, color, font_thickness, cv2.LINE_AA)
+    
+    return (x, y, x + text_w, text_y + baseline)
 
 
 def get_text_size_withnewline(text_orig, pos=(0, 0), font_scale=0.5, font_thickness=1):
     font = cv2.FONT_HERSHEY_SIMPLEX
-
     x, y = pos
     max_w = 0
-    total_h = y
-
-    for text in text_orig.split('\n'):
-        text_size, base_line = cv2.getTextSize(
-            text, font, font_scale, font_thickness)
+    lines = text_orig.split('\n')
+    
+    if not lines:
+        return 0, 0
+    
+    first_text_size, first_baseline = cv2.getTextSize(lines[0], font, font_scale, font_thickness)
+    current_y = y + first_text_size[1]
+    final_y = current_y
+    
+    for text in lines:
+        text_size, baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
         text_w, text_h = text_size
-        max_w = max(max_w, x + text_w)
-        total_h += text_h + base_line * 2
-
+        max_w = max(max_w, text_w)
+        final_y = current_y + baseline
+        current_y += text_h + baseline
+    
+    total_h = final_y - y
     return max_w, total_h

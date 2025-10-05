@@ -141,11 +141,16 @@ class DScanAnalyzer:
             cv2.imshow(self.win_name, im)
             cv2.waitKey(1)
             return
-        w, h = utils.get_text_size_withnewline(
-            message, (10, 10), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        im = np.full((h, w, 3), C.dscan.transparency_color, np.uint8)
+        
+        tmp_im = np.zeros((1000, 1000, 3), np.uint8)
+        x1, y1, x2, y2 = utils.draw_text_withnewline(
+            tmp_im, message, (10, 10), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        w, h = x2 - x1, y2 - y1
+        
+        im = np.full((h + 20, w + 20, 3), C.dscan.transparency_color, np.uint8)
         utils.draw_text_withnewline(
-            im, message, (10, 10), color=(255, 255, 255), bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            im, message, (10, 10), color=(255, 255, 255), bg_color=self.bg_color, 
+            font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
         self.last_im = im
         cv2.imshow(self.win_name, im)
         cv2.waitKey(1)
@@ -495,14 +500,17 @@ class DScanAnalyzer:
             text_lines.append(text)
 
         full_text = '\n'.join(text_lines)
-        w, h = utils.get_text_size_withnewline(
-            full_text, (20, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        tmp_im = np.zeros((2000, 2000, 3), np.uint8)
+        x1, y1, x2, y2 = utils.draw_text_withnewline(
+            tmp_im, full_text, (20, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        w, h = x2 - x1, y2 - y1
 
         im = np.zeros((h, w, 3), dtype=np.uint8)
         im[:] = C.dscan.transparency_color
 
-        y = utils.draw_text_withnewline(im, header_text, (10, 20), color=(
+        x1, y1, x2, y2 = utils.draw_text_withnewline(im, header_text, (10, 20), color=(
             0, 255, 0), bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        y = y2
 
         for data in combined_data:
             name = data['name'][:20]
@@ -513,14 +521,17 @@ class DScanAnalyzer:
                 text = f"{name} | D:{data['danger']:.1f} K:{data['kills']} L:{data['losses']}"
                 color = (255, 255, 255) if data['danger'] == 0 else (0, 0, 255) if data['danger'] >= 80 else (0, 255, 255)
 
-            text_w, text_h = utils.get_text_size_withnewline(
-                text, (10, y), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            tmp_im2 = np.zeros((200, 800, 3), np.uint8)
+            tx1, ty1, tx2, ty2 = utils.draw_text_withnewline(
+                tmp_im2, text, (10, 20), font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            text_w, text_h = tx2 - tx1, ty2 - ty1
 
             self.char_rects[data['name']] = (
                 (10, y, text_w, text_h), data['zkill_link'])
 
-            y = utils.draw_text_withnewline(
+            x1, y1, x2, y2 = utils.draw_text_withnewline(
                 im, text, (10, y), color=color, bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            y = y2
 
         return im
 
