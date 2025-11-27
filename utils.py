@@ -103,6 +103,18 @@ def win_transparent(wclass=None, title='', transparency=80, color_key=(0, 0, 0))
     except:
         pass
 
+def win_normal(wclass=None, title=''):
+    try:
+        hwnd = win32gui.FindWindow(wclass, title)
+        
+        styles = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+        styles &= ~(win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT)
+        win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, styles)
+        
+        win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, win32con.WS_OVERLAPPEDWINDOW)
+        win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+    except:
+        pass
 
 def get_ch_con():
     try:
@@ -113,35 +125,33 @@ def get_ch_con():
     return -1
 
 
-def draw_text_withnewline(im, text_orig, pos=(0, 0), color=(0, 255, 0), bg_color=(0, 0, 0), font_scale=0.7, font_thickness=None):
-    font = cv2.FONT_HERSHEY_SIMPLEX
+def draw_text_withnewline(text_orig, pos=(0, 0), color=(0, 255, 0), bg_color=(0, 0, 0), font_scale=0.7, font_thickness=None, padding=10):
     if font_thickness is None:
         font_thickness = math.ceil(2 * font_scale)
 
     x, y = pos
-    start_x, start_y = x, y
-    max_w = 0
     lines = text_orig.split('\n')
     
     if not lines:
-        return (x, y, x, y)
+        return np.zeros((padding*2, padding*2, 3), dtype=np.uint8)
     
-    first_text_size, first_baseline = cv2.getTextSize(lines[0], font, font_scale, font_thickness)
-    current_y = y + first_text_size[1]
-    final_y = current_y
+    max_w, total_h = get_text_size_withnewline(text_orig, pos, font_scale, font_thickness)
+    
+    im_w = max_w + padding * 2
+    im_h = total_h + padding * 2
+    im = np.full((im_h, im_w, 3), bg_color, dtype=np.uint8)
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    current_y = y + padding
     
     for text in lines:
         text_size, baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
-        text_w, text_h = text_size
-        
-        cv2.rectangle(im, (x, current_y-text_h), (x+text_w, current_y+baseline), bg_color, -1)
-        cv2.putText(im, text, (x, current_y), font, font_scale, color, font_thickness, cv2.LINE_AA)
-        
-        max_w = max(max_w, text_w)
-        final_y = current_y + baseline
-        current_y += text_h + baseline
+        text_h = text_size[1]
+        current_y += text_h
+        cv2.putText(im, text, (x + padding, current_y), font, font_scale, color, font_thickness, cv2.LINE_AA)
+        current_y += baseline
     
-    return (start_x, start_y, start_x + max_w, final_y)
+    return im
 
 
 def draw_text(im, text, pos=(0, 0), color=(0, 255, 0), bg_color=(0, 0, 0), font_scale=0.7, font_thickness=2):
