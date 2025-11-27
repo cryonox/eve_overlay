@@ -1,7 +1,7 @@
 
 import asyncio
 import aiohttp
-from logger import logger
+from loguru import logger
 import json
 import time
 from pathlib import Path
@@ -27,7 +27,7 @@ class EveKillClient(BaseAPIClient):
             try:
                 async with session.get(export_url, headers=headers, timeout=30) as response:
                     if response.status != 200:
-                        logger.log(f"Failed to get export info: {response.status}")
+                        logger.info(f"Failed to get export info: {response.status}")
                         return None
                     
                     collections = await response.json()
@@ -35,14 +35,14 @@ class EveKillClient(BaseAPIClient):
                     
                     if stats_collection:
                         total_count = stats_collection.get('estimatedCount', 0)
-                        logger.log(f"Total stats available for export: {total_count:,}")
+                        logger.info(f"Total stats available for export: {total_count:,}")
                         return stats_collection
                     else:
-                        logger.log("Stats collection not found in export info")
+                        logger.info("Stats collection not found in export info")
                         return None
                     
             except Exception as e:
-                logger.log(f"Error getting export info: {e}")
+                logger.info(f"Error getting export info: {e}")
                 return None
 
     async def export_ek_stats(self, batch_location='test_data/ek_batches_stats/', batch_size=100000, dst_json=None):
@@ -84,7 +84,7 @@ class EveKillClient(BaseAPIClient):
                     try:
                         async with session.get(export_url, headers=headers, params=params, timeout=60) as response:
                             if response.status != 200:
-                                logger.log(f"Export API error: {response.status}")
+                                logger.info(f"Export API error: {response.status}")
                                 break
                         
                             response_data = await response.json()
@@ -109,7 +109,7 @@ class EveKillClient(BaseAPIClient):
                             await asyncio.sleep(0.1)
                     
                     except Exception as e:
-                        logger.log(f"Error downloading: {e}")
+                        logger.info(f"Error downloading: {e}")
                         break
         
         if cur_batch_data:
@@ -126,7 +126,7 @@ class EveKillClient(BaseAPIClient):
             try:
                 async with session.get(export_url, headers=headers, timeout=30) as response:
                     if response.status != 200:
-                        logger.log(f"Failed to get export info: {response.status}")
+                        logger.info(f"Failed to get export info: {response.status}")
                         return None
                     
                     collections = await response.json()
@@ -134,14 +134,14 @@ class EveKillClient(BaseAPIClient):
                     
                     if chars_collection:
                         total_count = chars_collection.get('estimatedCount', 0)
-                        logger.log(f"Total characters available for export: {total_count:,}")
+                        logger.info(f"Total characters available for export: {total_count:,}")
                         return chars_collection
                     else:
-                        logger.log("Characters collection not found in export info")
+                        logger.info("Characters collection not found in export info")
                         return None
                     
             except Exception as e:
-                logger.log(f"Error getting export info: {e}")
+                logger.info(f"Error getting export info: {e}")
                 return None
 
     async def export_ek_characters(self, batch_location='test_data/ek_batches_chars/', batch_size=100000, dst_json=None):
@@ -180,7 +180,7 @@ class EveKillClient(BaseAPIClient):
                     try:
                         async with session.get(export_url, headers=headers, params=params, timeout=60) as response:
                             if response.status != 200:
-                                logger.log(f"Export API error: {response.status}")
+                                logger.info(f"Export API error: {response.status}")
                                 break
                     
                             response_data = await response.json()
@@ -205,7 +205,7 @@ class EveKillClient(BaseAPIClient):
                             await asyncio.sleep(0.1)
                 
                     except Exception as e:
-                        logger.log(f"Error downloading: {e}")
+                        logger.info(f"Error downloading: {e}")
                         break
     
         if cur_batch_data:

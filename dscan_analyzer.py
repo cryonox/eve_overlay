@@ -12,7 +12,7 @@ import utils
 from global_hotkeys import register_hotkeys, start_checking_hotkeys
 import webbrowser
 from bidict import bidict
-from logger import logger
+from loguru import logger
 import json
 
 
@@ -31,9 +31,11 @@ class DScanAnalyzer:
         self.should_destroy_window = False
         self.last_im = None
         self.last_result_im = None
-        cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL)
+        utils.set_dpi_awareness()
+        cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
         cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
         self.transparency_on = False
+        self.style_applied = False
         if self.transparency_on:
             utils.win_transparent('Main HighGUI class',
                                   self.win_name, self.transparency, (64, 64, 64))
@@ -55,13 +57,19 @@ class DScanAnalyzer:
         self.should_destroy_window = True
 
     def display(self):
-        im = np.zeros((100, 100, 3), dtype=np.uint8)
-        msg = self.state['msg']
-
-        utils.draw_text_withnewline(im, msg, (10, 10), color=(
-            255, 255, 255), bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        msg = self.state.get('msg', '')
+        if not msg:
+            im = np.full((50, 50, 3), C.dscan.transparency_color, np.uint8)
+        else:
+            im = utils.draw_text_withnewline(
+                msg, (0, 0), color=(255, 255, 255), bg_color=self.bg_color,
+                font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        self.last_im = im
         cv2.imshow(self.win_name, im)
-        cv2.waitKey(100)
+        cv2.waitKey(1)
+        if not self.style_applied:
+            utils.win_no_min_size('Main HighGUI class', self.win_name)
+            self.style_applied = True
         self.handle_transparency()
 
     def parse_dscan(self, dscan_data):
@@ -74,7 +82,7 @@ class DScanAnalyzer:
             self.parse_dscan(self.current_clipboard)
 
         except Exception as e:
-            logger.log(f"Error parsing clipboard: {e}")
+            logger.info(f"Error parsing clipboard: {e}")
             return None
 
     def mouse_callback(self, event, x, y, flags, param):
@@ -88,13 +96,12 @@ class DScanAnalyzer:
     def handle_transparency(self):
         if self.should_destroy_window:
             cv2.destroyWindow(self.win_name)
-            cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
             cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
             cv2.setMouseCallback(self.win_name, self.mouse_callback)
+            self.style_applied = False
 
             if self.transparency_on:
-                cv2.setWindowProperty(
-                    self.win_name, cv2.WND_PROP_ASPECT_RATIO, cv2.WINDOW_FREERATIO)
                 utils.win_transparent(
                     'Main HighGUI class', self.win_name, self.transparency, (64, 64, 64))
 

@@ -12,7 +12,7 @@ import utils
 from global_hotkeys import register_hotkeys, start_checking_hotkeys
 import webbrowser
 from bidict import bidict
-from logger import logger
+from loguru import logger
 import json
 
 
@@ -37,10 +37,10 @@ async def get_zkill_data_async(session, char_id, max_retries=3):
         except Exception as e:
             if attempt < max_retries:
                 wait_time = (2 ** attempt) * 2
-                logger.log(f"Network error for char {char_id}, retrying in {wait_time}s: {e}")
+                logger.info(f"Network error for char {char_id}, retrying in {wait_time}s: {e}")
                 await asyncio.sleep(wait_time)
                 continue
-            logger.log(f"Error fetching zkill data for {char_id}: {e}")
+            logger.info(f"Error fetching zkill data for {char_id}: {e}")
             return {'error': 'network_error'}
     
     return {'error': 'max_retries_exceeded'}
@@ -159,7 +159,7 @@ class DScanAnalyzer:
         try:
             return pyperclip.paste()
         except Exception as e:
-            logger.log(f"Error reading clipboard: {e}")
+            logger.info(f"Error reading clipboard: {e}")
             return None
 
     async def parse_local(self, dscan_data):
@@ -196,7 +196,7 @@ class DScanAnalyzer:
                 self.last_zkill_results = zkill_results
 
         except Exception as e:
-            logger.log(f"Error parsing local: {e}")
+            logger.info(f"Error parsing local: {e}")
             return None
 
     async def parse_dscan(self, dscan_data):
@@ -255,7 +255,7 @@ class DScanAnalyzer:
             self.last_dscan_time = current_time
             self.last_ship_counts = ship_counts
         except Exception as e:
-            logger.log(f"Error parsing dscan: {e}")
+            logger.info(f"Error parsing dscan: {e}")
             return None
 
     def parse_clipboard(self, clipboard_data):
@@ -273,7 +273,7 @@ class DScanAnalyzer:
                 self.previous_ship_counts = None
                 return asyncio.run(self.parse_local(clipboard_data))
         except Exception as e:
-            logger.log(f"Error parsing clipboard: {e}")
+            logger.info(f"Error parsing clipboard: {e}")
             return None
 
     async def process_names_esi(self, char_names):
@@ -284,12 +284,12 @@ class DScanAnalyzer:
             skip_zkill = len(result) > self.zkill_limit
             
             if skip_zkill:
-                logger.log(f"Skipping zkill lookup for {len(result)} characters (limit: {self.zkill_limit})")
+                logger.info(f"Skipping zkill lookup for {len(result)} characters (limit: {self.zkill_limit})")
                 # Force aggregate mode when skipping zkill
                 if not self.aggregated_mode:
                     self.aggregated_mode = True
                     self.mode_changed = True
-                    logger.log("Automatically switched to aggregate mode due to zkill limit")
+                    logger.info("Automatically switched to aggregate mode due to zkill limit")
             else:
                 # Fetch zkill data for all characters
                 utils.tick()
@@ -348,8 +348,8 @@ class DScanAnalyzer:
             id_to_name = await self.ids_to_names_esi(corp_ids, alliance_ids)
             tickers = await self.get_corp_alliance_tickers(corp_ids, alliance_ids)
             
-            logger.log(f'Resolved names: {len(id_to_name)} entries')
-            logger.log(f'Resolved tickers: {len(tickers)} entries')
+            logger.info(f'Resolved names: {len(id_to_name)} entries')
+            logger.info(f'Resolved tickers: {len(tickers)} entries')
 
             char_data_list = []
             
@@ -398,7 +398,7 @@ class DScanAnalyzer:
 
             return char_data_list
         except Exception as e:
-            logger.log(f"Error processing names via ESI: {e}")
+            logger.info(f"Error processing names via ESI: {e}")
             return None
 
     async def get_zkill_stats_async(self, session, char_name):
@@ -420,7 +420,7 @@ class DScanAnalyzer:
 
             return await self.get_zkill_data_cached(session, char_id)
         except Exception as e:
-            logger.log(f"Error fetching zkill data for {char_name}: {e}")
+            logger.info(f"Error fetching zkill data for {char_name}: {e}")
         return None
 
     async def fetch_zkill_data(self, char_data):
@@ -696,7 +696,7 @@ class DScanAnalyzer:
             return im
             
         except Exception as e:
-            logger.log(f"Error creating dscan display: {e}")
+            logger.info(f"Error creating dscan display: {e}")
             return None
 
     def calculate_ship_diffs(self, prev_counts, curr_counts):
@@ -798,7 +798,7 @@ class DScanAnalyzer:
         async with aiohttp.ClientSession() as session:
             async with session.post(names_url, json=char_names) as response:
                 if response.status != 200:
-                    logger.log(
+                    logger.info(
                         f"Failed to resolve names batch: {response.status}")
                     return []
 
@@ -827,7 +827,7 @@ class DScanAnalyzer:
 
             all_results = cached_results.copy()
             chunk_size = 500
-            logger.log(f"Resolving {len(uncached_names)} names via ESI")
+            logger.info(f"Resolving {len(uncached_names)} names via ESI")
             for i in range(0, len(uncached_names), chunk_size):
                 chunk = uncached_names[i:i + chunk_size]
                 chunk_results = await self._resolve_names_batch_esi(chunk)
@@ -842,12 +842,12 @@ class DScanAnalyzer:
 
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.log(
+            logger.info(
                 f"Error resolving names via ESI after {elapsed:.2f}s: {e}")
             return []
         finally:
             elapsed = time.time() - start_time
-            logger.log(f"Total ESI resolution time: {elapsed:.2f}s")
+            logger.info(f"Total ESI resolution time: {elapsed:.2f}s")
 
     async def _resolve_ids_batch_esi(self, corp_ids, alliance_ids):
         """Internal function to resolve <=1000 corp/alliance IDs to names using ESI"""
@@ -860,7 +860,7 @@ class DScanAnalyzer:
         async with aiohttp.ClientSession() as session:
             async with session.post(names_url, json=all_ids) as response:
                 if response.status != 200:
-                    logger.log(
+                    logger.info(
                         f"Failed to resolve IDs batch: {response.status}")
                     return {}
 
@@ -883,8 +883,8 @@ class DScanAnalyzer:
                 else:
                     uncached_ids.append(id)
 
-            logger.log(f'Cached ID->name results: {len(cached_results)}')
-            logger.log(f'Uncached IDs: {len(uncached_ids)}')
+            logger.info(f'Cached ID->name results: {len(cached_results)}')
+            logger.info(f'Uncached IDs: {len(uncached_ids)}')
 
             if not uncached_ids:
                 return cached_results
@@ -899,7 +899,7 @@ class DScanAnalyzer:
 
                 chunk_results = await self._resolve_ids_batch_esi(chunk_corp_ids, chunk_alliance_ids)
 
-                logger.log(
+                logger.info(
                     f'Chunk resolved {len(chunk_results)} names from {len(chunk)} IDs')
 
                 for id, name in chunk_results.items():
@@ -911,12 +911,12 @@ class DScanAnalyzer:
 
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.log(
+            logger.info(
                 f"Error resolving IDs via ESI after {elapsed:.2f}s: {e}")
             return {}
         finally:
             elapsed = time.time() - start_time
-            logger.log(f"Total ESI ID resolution time: {elapsed:.2f}s")
+            logger.info(f"Total ESI ID resolution time: {elapsed:.2f}s")
 
     async def get_zkill_data_cached(self, session, char_id):
         if char_id in self.zkill_cache:
@@ -978,7 +978,7 @@ class DScanAnalyzer:
                         'alliance_id': data.get('alliance_id')
                     }
         except Exception as e:
-            logger.log(f"Error fetching ESI data for char {char_id}: {e}")
+            logger.info(f"Error fetching ESI data for char {char_id}: {e}")
         return {}
 
     async def get_corp_alliance_tickers(self, corp_ids, alliance_ids):
@@ -1040,7 +1040,7 @@ class DScanAnalyzer:
                     data = await response.json()
                     return {'ticker': data.get('ticker')}
         except Exception as e:
-            logger.log(f"Error fetching corp info for {corp_id}: {e}")
+            logger.info(f"Error fetching corp info for {corp_id}: {e}")
         return {}
 
     async def _fetch_alliance_info(self, session, alliance_id, url):
@@ -1051,7 +1051,7 @@ class DScanAnalyzer:
                     data = await response.json()
                     return {'ticker': data.get('ticker')}
         except Exception as e:
-            logger.log(f"Error fetching alliance info for {alliance_id}: {e}")
+            logger.info(f"Error fetching alliance info for {alliance_id}: {e}")
         return {}
 
     def clear_cache(self):
@@ -1059,7 +1059,7 @@ class DScanAnalyzer:
         self.zkill_cache = {}
         self.esi_char_cache = {}
         self.ticker_cache = {}
-        logger.log("All caches cleared")
+        logger.info("All caches cleared")
 
 
 def main():

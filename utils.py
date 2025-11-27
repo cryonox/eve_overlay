@@ -15,7 +15,7 @@ import ctypes
 import win32print
 import time
 import math
-from logger import logger
+from loguru import logger
 
 timer_trackers = {}
 
@@ -31,7 +31,7 @@ def tock(name='default'):
     
     dur = (time.perf_counter_ns() - timer_trackers[name]) / 1000 / 1000
     if name != 'default':
-        logger.log(f'{name} = {dur} ms')
+        logger.info(f'{name} = {dur} ms')
     return dur
 
 
@@ -106,13 +106,24 @@ def win_transparent(wclass=None, title='', transparency=80, color_key=(0, 0, 0))
 def win_normal(wclass=None, title=''):
     try:
         hwnd = win32gui.FindWindow(wclass, title)
-        
+
         styles = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
         styles &= ~(win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT)
         win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, styles)
-        
+
         win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, win32con.WS_OVERLAPPEDWINDOW)
         win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+    except:
+        pass
+
+def win_no_min_size(wclass=None, title=''):
+    try:
+        hwnd = win32gui.FindWindow(wclass, title)
+        cur_style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+        new_style = (cur_style & ~(win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX)) | win32con.WS_POPUP
+        win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, new_style)
+        win32gui.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                              win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_FRAMECHANGED)
     except:
         pass
 
@@ -190,3 +201,31 @@ def get_text_size_withnewline(text_orig, pos=(0, 0), font_scale=0.5, font_thickn
     
     total_h = final_y - y
     return max_w, total_h
+
+
+def draw_text_on_image(im, text_orig, pos=(0, 0), color=(0, 255, 0), bg_color=(0, 0, 0), font_scale=0.7, font_thickness=None):
+    if font_thickness is None:
+        font_thickness = math.ceil(2 * font_scale)
+
+    x, y = pos
+    lines = text_orig.split('\n')
+    
+    if not lines:
+        return (x, y, x, y)
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    current_y = y
+    max_x = x
+    
+    for text in lines:
+        text_size, baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
+        text_w, text_h = text_size
+        current_y += text_h
+        
+        cv2.rectangle(im, (x, current_y - text_h), (x + text_w, current_y + baseline), bg_color, -1)
+        cv2.putText(im, text, (x, current_y), font, font_scale, color, font_thickness, cv2.LINE_AA)
+        
+        max_x = max(max_x, x + text_w)
+        current_y += baseline
+    
+    return (x, y, max_x, current_y)

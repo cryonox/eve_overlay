@@ -1,7 +1,7 @@
 import asyncio
 import aiohttp
-from logger import logger
 from abc import ABC, abstractmethod
+from loguru import logger
 
 class BaseAPIClient(ABC):
     def __init__(self, max_concurrent=50):
@@ -63,10 +63,10 @@ class BaseAPIClient(ABC):
                 except Exception as e:
                     if attempt < max_retries:
                         wait_time = (2 ** attempt) * 2
-                        logger.log(f"{self.__class__.__name__} network error for char {char_id}, retrying in {wait_time}s: {e}")
+                        logger.info(f"{self.__class__.__name__} network error for char {char_id}, retrying in {wait_time}s: {e}")
                         await asyncio.sleep(wait_time)
                         continue
-                    logger.log(f"Error fetching {self.__class__.__name__} data for {char_id}: {e}")
+                    logger.info(f"Error fetching {self.__class__.__name__} data for {char_id}: {e}")
                     return {'error': 'network_error'}
             
             return {'error': 'max_retries_exceeded'}
