@@ -14,6 +14,7 @@ import webbrowser
 from bidict import bidict
 from loguru import logger
 import json
+import win32gui
 
 
 class DScanAnalyzer:
@@ -35,7 +36,6 @@ class DScanAnalyzer:
         cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
         cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
         self.transparency_on = False
-        self.style_applied = False
         if self.transparency_on:
             utils.win_transparent('Main HighGUI class',
                                   self.win_name, self.transparency, (64, 64, 64))
@@ -67,9 +67,6 @@ class DScanAnalyzer:
         self.last_im = im
         cv2.imshow(self.win_name, im)
         cv2.waitKey(1)
-        if not self.style_applied:
-            utils.win_no_min_size('Main HighGUI class', self.win_name)
-            self.style_applied = True
         self.handle_transparency()
 
     def parse_dscan(self, dscan_data):
@@ -95,13 +92,27 @@ class DScanAnalyzer:
 
     def handle_transparency(self):
         if self.should_destroy_window:
+            hwnd = win32gui.FindWindow('Main HighGUI class', self.win_name)
+            cx = None
+            cy = None
+            cw = None
+            ch = None
+            if hwnd:
+                wx, wy, wx2, wy2 = win32gui.GetWindowRect(hwnd)
+                th, bw = utils.get_title_bar_dimensions(hwnd)
+                cx = wx + bw
+                cy = wy + th
+                cw = wx2 - wx - 2 * bw
+                ch = wy2 - wy - th - bw
+
             cv2.destroyWindow(self.win_name)
             cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
             cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
             cv2.setMouseCallback(self.win_name, self.mouse_callback)
-            self.style_applied = False
 
             if self.transparency_on:
+                cv2.setWindowProperty(
+                    self.win_name, cv2.WND_PROP_ASPECT_RATIO, cv2.WINDOW_FREERATIO)
                 utils.win_transparent(
                     'Main HighGUI class', self.win_name, self.transparency, (64, 64, 64))
 
@@ -111,6 +122,16 @@ class DScanAnalyzer:
             if im_to_show is not None:
                 cv2.imshow(self.win_name, im_to_show)
                 cv2.waitKey(1)
+                if cx is not None and cy is not None and cw is not None and ch is not None:
+                    hwnd = win32gui.FindWindow('Main HighGUI class', self.win_name)
+                    if hwnd:
+                        if self.transparency_on:
+                            win32gui.MoveWindow(hwnd, cx, cy, cw, ch, True)
+                        else:
+                            th, bw = utils.get_title_bar_dimensions(hwnd)
+                            w = cw + 2 * bw
+                            h = ch + th + bw
+                            win32gui.MoveWindow(hwnd, cx - bw, cy - th, w, h, True)
 
     def show_status(self, msg):
         self.state['msg'] = msg
