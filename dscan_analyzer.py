@@ -42,6 +42,8 @@ class PilotData:
     stats: Optional[Dict] = None
     stats_link: Optional[str] = None
     error_msg: Optional[str] = None
+    corp_alliance_resolved: bool = False
+    corp_alliance_from_cache: bool = False
 
 
 class DScanAnalyzer:
@@ -187,6 +189,7 @@ class DScanAnalyzer:
                     names = await self.esi.resolve_ids_to_names(session, ids_to_resolve)
                     pilot.corp_name = names.get(pilot.corp_id, 'Unknown')
                     pilot.alliance_name = names.get(pilot.alliance_id) if pilot.alliance_id else None
+                pilot.corp_alliance_resolved = True
 
             pilot.stats_link = self.stats_provider.get_link(pilot.char_id)
 
@@ -226,7 +229,8 @@ class DScanAnalyzer:
                     corp_id=info['corp_id'],
                     alliance_id=info['alliance_id'],
                     corp_name=info['corp_name'],
-                    alliance_name=info['alliance_name']
+                    alliance_name=info['alliance_name'],
+                    corp_alliance_from_cache=True
                 )
                 pilot.stats_link = self.stats_provider.get_link(pilot.char_id)
                 if pilot.char_id in stats_cache:
@@ -244,6 +248,7 @@ class DScanAnalyzer:
                     pilot.alliance_id = char_info.get('alliance_id')
                     pilot.corp_name = self.esi.id_name_cache.get(pilot.corp_id, 'Unknown') if pilot.corp_id else None
                     pilot.alliance_name = self.esi.id_name_cache.get(pilot.alliance_id) if pilot.alliance_id else None
+                    pilot.corp_alliance_resolved = True
                 if char_id in stats_cache:
                     stats = stats_cache[char_id]
                     if stats and 'error' not in stats:
@@ -269,6 +274,8 @@ class DScanAnalyzer:
 
         pilots_needing_esi = [p for p in self.pilots.values() if p.state == PilotState.SEARCHING_ESI]
         pilots_needing_stats = [p for p in self.pilots.values() if p.state in [PilotState.CACHE_HIT, PilotState.SEARCHING_STATS]]
+        pilots_needing_corp_resolve = [p for p in self.pilots.values()
+                                       if p.corp_alliance_from_cache and not p.corp_alliance_resolved]
 
         skip_stats = len(char_names) > self.stats_limit
         if skip_stats:
@@ -276,25 +283,33 @@ class DScanAnalyzer:
             for p in pilots_needing_stats:
                 p.state = PilotState.FOUND
 
-        if pilots_needing_esi or (not skip_stats and pilots_needing_stats):
-            self._start_network_fetch(pilots_needing_esi, pilots_needing_stats, skip_stats)
+        if pilots_needing_esi or pilots_needing_corp_resolve or (not skip_stats and pilots_needing_stats):
+            self._start_network_fetch(pilots_needing_esi, pilots_needing_stats, skip_stats, pilots_needing_corp_resolve)
 
-    def _start_network_fetch(self, pilots_esi: List[PilotData], pilots_stats: List[PilotData], skip_stats: bool):
+    def _start_network_fetch(self, pilots_esi: List[PilotData], pilots_stats: List[PilotData],
+                              skip_stats: bool, pilots_corp_resolve: List[PilotData] = None):
         if self._network_thread and self._network_thread.is_alive():
             pass
 
         def run_fetch():
-            asyncio.run(self._fetch_network_data(pilots_esi, pilots_stats, skip_stats))
+            asyncio.run(self._fetch_network_data(pilots_esi, pilots_stats, skip_stats, pilots_corp_resolve or []))
 
         self._network_thread = threading.Thread(target=run_fetch, daemon=True)
         self._network_thread.start()
 
-    async def _fetch_network_data(self, pilots_esi: List[PilotData], pilots_stats: List[PilotData], skip_stats: bool):
+    async def _fetch_network_data(self, pilots_esi: List[PilotData], pilots_stats: List[PilotData],
+                                   skip_stats: bool, pilots_corp_resolve: List[PilotData] = None):
         connector = aiohttp.TCPConnector(limit=50)
         async with aiohttp.ClientSession(connector=connector) as session:
             if pilots_esi:
                 esi_tasks = [self.lookup_pilot_async(p, session, skip_stats) for p in pilots_esi]
                 await asyncio.gather(*esi_tasks, return_exceptions=True)
+
+            if pilots_corp_resolve:
+                corp_tasks = [self.resolve_corp_alliance_async(p, session) for p in pilots_corp_resolve
+                              if not p.corp_alliance_resolved]
+                if corp_tasks:
+                    await asyncio.gather(*corp_tasks, return_exceptions=True)
 
             if not skip_stats and pilots_stats:
                 stats_tasks = []
@@ -320,6 +335,25 @@ class DScanAnalyzer:
             pilot.state = PilotState.ERROR
             pilot.error_msg = str(e)
 
+    async def resolve_corp_alliance_async(self, pilot: PilotData, session: aiohttp.ClientSession):
+        if pilot.corp_alliance_resolved:
+            return
+        try:
+            char_info = await self.esi.get_char_info(session, pilot.char_id)
+            new_corp_id = char_info.get('corporation_id')
+            new_alliance_id = char_info.get('alliance_id')
+
+            ids_to_resolve = [i for i in [new_corp_id, new_alliance_id] if i]
+            if ids_to_resolve:
+                names = await self.esi.resolve_ids_to_names(session, ids_to_resolve)
+                pilot.corp_id = new_corp_id
+                pilot.alliance_id = new_alliance_id
+                pilot.corp_name = names.get(new_corp_id, 'Unknown')
+                pilot.alliance_name = names.get(new_alliance_id) if new_alliance_id else None
+
+            pilot.corp_alliance_resolved = True
+        except Exception as e:
+            logger.info(f"Error resolving corp/alliance for {pilot.name}: {e}")
 
     async def parse_dscan(self, dscan_data: str):
         try:
