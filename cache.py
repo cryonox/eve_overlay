@@ -28,71 +28,99 @@ class CacheManager:
         trie_path = self.cache_dir / 'names.pkl'
         ids_path = self.cache_dir / 'ids.bin'
         char_info_path = self.cache_dir / 'char_info.bin'
+        mappings_path = self.cache_dir / 'mappings.pkl'
 
         if self._trie is None and trie_path.exists():
             logger.info("  Loading trie...")
             self._trie = self.load_trie_pickle(trie_path)
             logger.info(f"  Trie loaded: {len(self._trie):,} entries")
 
-        if self._tid2id is None and ids_path.exists():
-            logger.info("  Loading IDs...")
-            with open(ids_path, 'rb') as f:
-                data = f.read()
+        expected_cnt = len(self._trie) if self._trie else 0
 
-            self._tid2id = []
-            bio = io.BytesIO(data)
+        ids_pkl_path = self.cache_dir / 'ids.pkl'
+        if self._tid2id is None:
+            if ids_pkl_path.exists():
+                logger.info("  Loading IDs (cached)...")
+                with open(ids_pkl_path, 'rb') as f:
+                    self._tid2id = pickle.load(f)
+                logger.info(f"  IDs loaded: {len(self._tid2id):,} total")
+            elif ids_path.exists():
+                logger.info("  Loading IDs (first run)...")
+                with open(ids_path, 'rb') as f:
+                    data = f.read()
+                self._tid2id = [0] * expected_cnt
+                bio, idx = io.BytesIO(data), 0
+                while bio.tell() < len(data):
+                    try:
+                        id_val, _ = leb128.i.decode_reader(bio)
+                        self._tid2id[idx] = id_val
+                        idx += 1
+                    except:
+                        break
+                logger.info(f"  IDs loaded: {idx:,} total")
+                logger.info("  Saving IDs cache...")
+                with open(ids_pkl_path, 'wb') as f:
+                    pickle.dump(self._tid2id, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-            while bio.tell() < len(data):
-                try:
-                    id_val, _ = leb128.i.decode_reader(bio)
-                    self._tid2id.append(id_val)
-                except:
-                    break
-            logger.info(f"  IDs loaded: {len(self._tid2id):,} total")
+        char_info_pkl_path = self.cache_dir / 'char_info.pkl'
+        if self._char_info is None:
+            if char_info_pkl_path.exists():
+                logger.info("  Loading char info (cached)...")
+                with open(char_info_pkl_path, 'rb') as f:
+                    self._char_info = pickle.load(f)
+                logger.info(f"  Char info loaded: {len(self._char_info):,} total")
+            elif char_info_path.exists():
+                logger.info("  Loading char info (first run)...")
+                with open(char_info_path, 'rb') as f:
+                    data = f.read()
+                self._char_info = [None] * expected_cnt
+                bio, idx = io.BytesIO(data), 0
+                while bio.tell() < len(data):
+                    try:
+                        corp_id, _ = leb128.i.decode_reader(bio)
+                        alliance_id, _ = leb128.i.decode_reader(bio)
+                        self._char_info[idx] = None if corp_id == 0 else (corp_id, alliance_id)
+                        idx += 1
+                    except:
+                        break
+                logger.info(f"  Char info loaded: {idx:,} total")
+                logger.info("  Saving char info cache...")
+                with open(char_info_pkl_path, 'wb') as f:
+                    pickle.dump(self._char_info, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        if self._char_info is None and char_info_path.exists():
-            logger.info("  Loading char info...")
-            with open(char_info_path, 'rb') as f:
-                data = f.read()
-
-            self._char_info = []
-            bio = io.BytesIO(data)
-
-            while bio.tell() < len(data):
-                try:
-                    corp_id, _ = leb128.i.decode_reader(bio)
-                    alliance_id, _ = leb128.i.decode_reader(bio)
-
-                    if corp_id == 0:
-                        self._char_info.append(None)
-                    else:
-                        self._char_info.append((corp_id, alliance_id))
-                except:
-                    break
-            logger.info(f"  Char info loaded: {len(self._char_info):,} total")
-
-        if self._name2tid is None and self._trie:
-            logger.info("  Building name mappings...")
+        if mappings_path.exists():
+            logger.info("  Loading precomputed mappings...")
+            with open(mappings_path, 'rb') as f:
+                mappings = pickle.load(f)
+            self._name2tid = mappings['name2tid']
+            self._tid2name = mappings['tid2name']
+            self._corp_id_to_name = mappings['corp_id_to_name']
+            self._alliance_id_to_name = mappings['alliance_id_to_name']
+            logger.info(f"  Mappings loaded: {len(self._name2tid):,} entries")
+        elif self._name2tid is None and self._trie:
+            logger.info("  Building name mappings (first run)...")
             self._name2tid = {}
             self._tid2name = {}
             self._corp_id_to_name = {}
             self._alliance_id_to_name = {}
-
             for tid in range(len(self._trie)):
                 name = self._trie.restore_key(tid)
                 self._name2tid[name] = tid
                 self._tid2name[tid] = name
-
                 if name.startswith('#'):
-                    corp_name = name[1:]
-                    corp_id = self._tid2id[tid]
-                    self._corp_id_to_name[corp_id] = corp_name
+                    self._corp_id_to_name[self._tid2id[tid]] = name[1:]
                 elif name.startswith('@'):
-                    alliance_name = name[1:]
-                    alliance_id = self._tid2id[tid]
-                    self._alliance_id_to_name[alliance_id] = alliance_name
-
+                    self._alliance_id_to_name[self._tid2id[tid]] = name[1:]
             logger.info(f"  Name mappings built: {len(self._name2tid):,} total")
+            logger.info("  Saving mappings for faster future loads...")
+            mappings = {
+                'name2tid': self._name2tid,
+                'tid2name': self._tid2name,
+                'corp_id_to_name': self._corp_id_to_name,
+                'alliance_id_to_name': self._alliance_id_to_name
+            }
+            with open(mappings_path, 'wb') as f:
+                pickle.dump(mappings, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         self._cache_loaded = True
         logger.info("Cache loading complete")
@@ -200,7 +228,7 @@ class CacheManager:
                 f.write(leb128.i.encode(alliance_id))
 
         logger.info(f"Built cache with {len(names)} entries")
-        logger.info(f"Cache saved to {trie_path}, {ids_path}, and {char_info_path}")
+        logger.info(f"Cache saved to {trie_path}, {ids_path}, {char_info_path}")
 
         return trie
 

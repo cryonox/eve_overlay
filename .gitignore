@@ -5,3 +5,6 @@ build
 config.private.yaml
 test_data/
 .augment-guidelines
+cache/char_info.pkl
+cache/ids.pkl
+cache/mappings.pkl
