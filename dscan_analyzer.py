@@ -265,8 +265,11 @@ class DScanAnalyzer:
                     break
 
     def should_ignore_pilot(self, pilot: PilotData) -> bool:
-        return (pilot.corp_name in self.ignore_corps or
-                pilot.alliance_name in self.ignore_alliances if pilot.alliance_name else False)
+        if pilot.corp_name and any(ic.lower() in pilot.corp_name.lower() for ic in self.ignore_corps):
+            return True
+        if pilot.alliance_name and any(ia.lower() in pilot.alliance_name.lower() for ia in self.ignore_alliances):
+            return True
+        return False
 
     async def lookup_pilot_async(self, pilot: PilotData, session: aiohttp.ClientSession):
         try:
@@ -308,6 +311,7 @@ class DScanAnalyzer:
 
     def process_cache_lookup(self, names: List[str]) -> Dict[str, PilotData]:
         pilots = {}
+        stats_cache = self.stats_provider.client.cache
         for name in names:
             info = self.cache.get_char_info(name)
             if info:
@@ -321,6 +325,24 @@ class DScanAnalyzer:
                     alliance_name=info['alliance_name']
                 )
                 pilot.stats_link = self.stats_provider.get_link(pilot.char_id)
+                if pilot.char_id in stats_cache:
+                    stats = stats_cache[pilot.char_id]
+                    if stats and 'error' not in stats:
+                        pilot.stats = self.stats_provider.extract_display_stats(stats)
+                        pilot.state = PilotState.FOUND
+            elif name in self.esi.name_cache:
+                char_id = self.esi.name_cache[name]
+                pilot = PilotData(name=name, char_id=char_id, state=PilotState.SEARCHING_STATS)
+                pilot.stats_link = self.stats_provider.get_link(char_id)
+                if char_id in self.esi.char_cache:
+                    char_info = self.esi.char_cache[char_id]
+                    pilot.corp_id = char_info.get('corporation_id')
+                    pilot.alliance_id = char_info.get('alliance_id')
+                if char_id in stats_cache:
+                    stats = stats_cache[char_id]
+                    if stats and 'error' not in stats:
+                        pilot.stats = self.stats_provider.extract_display_stats(stats)
+                        pilot.state = PilotState.FOUND
             else:
                 pilot = PilotData(name=name, state=PilotState.SEARCHING_ESI)
             pilots[name] = pilot
@@ -338,7 +360,7 @@ class DScanAnalyzer:
         self.result_start_time = time.time()
 
         pilots_needing_esi = [p for p in self.pilots.values() if p.state == PilotState.SEARCHING_ESI]
-        pilots_needing_stats = [p for p in self.pilots.values() if p.state == PilotState.CACHE_HIT]
+        pilots_needing_stats = [p for p in self.pilots.values() if p.state in [PilotState.CACHE_HIT, PilotState.SEARCHING_STATS]]
 
         skip_stats = len(char_names) > self.stats_limit
         if skip_stats:

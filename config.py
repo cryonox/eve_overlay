@@ -35,7 +35,8 @@ def dict2attrdict(dictionary):
 def create_default_config(fpath):
     default_config = {
         'logging': {
-            'enabled': True
+            'enabled': True,
+            'level': 'INFO'
         },
         'dscan': {
             'enabled': True,
@@ -108,6 +109,13 @@ def merge_dict(base, update):
     return base
 
 
+def configure_logger(cfg):
+    from loguru import logger
+    logger.remove()
+    level = cfg.logging.get('level', 'INFO').upper()
+    logger.add(sys.stderr, level=level)
+
+
 C = None
 if C is None:
     C = load_config()
@@ -124,3 +132,4 @@ if C is None:
     cur_path = Path(__file__).resolve().parent
     rules['$pwd'] = str(cur_path)
     C = substitute(C, rules)
+    configure_logger(C)

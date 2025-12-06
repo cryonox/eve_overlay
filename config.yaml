@@ -1,5 +1,6 @@
 logging:
   enabled: true
+  level: INFO
 dscan:
   bg_color: [25, 25, 25]
   enabled: true
