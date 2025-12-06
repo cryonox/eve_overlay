@@ -513,18 +513,26 @@ class DScanAnalyzer:
             return None
 
         corp_counts, alliance_counts, group_counts = {}, {}, {grp['name']: 0 for grp in self.groups}
+        corp_to_alliance = {}
         for pilot in self.pilots.values():
             corp = pilot.corp_name or 'Unknown'
             corp_counts[corp] = corp_counts.get(corp, 0) + 1
             if pilot.alliance_name:
                 alliance_counts[pilot.alliance_name] = alliance_counts.get(pilot.alliance_name, 0) + 1
+                corp_to_alliance[corp] = pilot.alliance_name
             grp = self.get_pilot_group(pilot)
             if grp:
                 group_counts[grp['name']] += 1
 
+        def get_entity_group(name):
+            if name in self.entity_to_group:
+                return self.entity_to_group[name]
+            alliance = corp_to_alliance.get(name)
+            return self.entity_to_group.get(alliance) if alliance else None
+
         def sort_key(item):
             name, cnt = item
-            grp = self.entity_to_group.get(name)
+            grp = get_entity_group(name)
             return (0, grp['order'], -cnt) if grp else (1, -cnt, name)
 
         sorted_alliances = sorted(alliance_counts.items(), key=sort_key)
@@ -549,7 +557,7 @@ class DScanAnalyzer:
 
         right_lines_data = [("Corporations:", (255, 255, 255))]
         for c, n in sorted_corps:
-            grp = self.entity_to_group.get(c)
+            grp = get_entity_group(c)
             color = grp['color'] if grp else (255, 255, 255)
             right_lines_data.append((f"  {c}: {n}", color))
 

@@ -19,3 +19,11 @@ dscan:
   transparency: 180
   transparency_color: [64, 64, 64]
   transparency_on: true
+  groups:
+    blue:
+      entities: [The Initiative.]
+      color: [255, 206, 135]
+    red:
+      entities: [Fraternity.]
+      color: [0, 0, 255]
+      
