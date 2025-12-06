@@ -15,6 +15,7 @@ dscan:
   ignore_alliances: []
   ignore_corps: []
   timeout: 10
+  diff_timeout: 60
   transparency: 180
   transparency_color: [64, 64, 64]
   transparency_on: true

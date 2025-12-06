@@ -1,5 +1,6 @@
 import pyperclip
 import time
+import copy
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import Optional, Dict, List
@@ -361,7 +362,8 @@ class DScanAnalyzer:
                 ships = json.load(f)
 
             cur_time = time.time()
-            if self.last_dscan_time and cur_time - self.last_dscan_time > 60:
+            diff_timeout = C.dscan.get('diff_timeout', 60)
+            if self.last_dscan_time and cur_time - self.last_dscan_time > diff_timeout:
                 self.last_ship_counts = None
                 self.previous_ship_counts = None
 
@@ -386,7 +388,7 @@ class DScanAnalyzer:
                 return
 
             if self.last_ship_counts is not None:
-                self.previous_ship_counts = self.last_ship_counts
+                self.previous_ship_counts = copy.deepcopy(self.last_ship_counts)
 
             self.result_start_time = time.time()
             self.paused_time = 0
@@ -403,8 +405,6 @@ class DScanAnalyzer:
         self.is_local = not is_dscan
 
         if is_dscan:
-            self.last_ship_counts = None
-            self.previous_ship_counts = None
             asyncio.run(self.parse_dscan(clipboard_data))
         else:
             self.process_local(clipboard_data)
@@ -529,6 +529,11 @@ class DScanAnalyzer:
                     prev = self.previous_ship_counts.get(grp, {}).get(ship, 0)
                     if cnt != prev:
                         ship_diffs[ship] = cnt - prev
+            cur_ships = {s for ships in self.last_ship_counts.values() for s in ships}
+            for grp, ships in self.previous_ship_counts.items():
+                for ship, prev_cnt in ships.items():
+                    if ship not in cur_ships:
+                        ship_diffs[ship] = -prev_cnt
 
         ship_list, group_totals, total = [], {}, 0
         for grp, ships in self.last_ship_counts.items():
@@ -537,6 +542,25 @@ class DScanAnalyzer:
             total += grp_total
             for ship, cnt in ships.items():
                 ship_list.append((ship, cnt, ship_diffs.get(ship, 0)))
+
+        if self.previous_ship_counts:
+            cur_ships = {s for ships in self.last_ship_counts.values() for s in ships}
+            for grp, ships in self.previous_ship_counts.items():
+                for ship, prev_cnt in ships.items():
+                    if ship not in cur_ships:
+                        ship_list.append((ship, 0, -prev_cnt))
+
+        group_diffs = {}
+        if self.previous_ship_counts:
+            for grp, cur_total in group_totals.items():
+                prev_total = sum(self.previous_ship_counts.get(grp, {}).values())
+                if cur_total != prev_total:
+                    group_diffs[grp] = cur_total - prev_total
+            for grp in self.previous_ship_counts:
+                if grp not in group_totals:
+                    prev_total = sum(self.previous_ship_counts[grp].values())
+                    group_diffs[grp] = -prev_total
+                    group_totals[grp] = 0
 
         ship_list.sort(key=lambda x: (x[1] == 0, -x[1]))
         sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
@@ -549,9 +573,14 @@ class DScanAnalyzer:
             diff_str = f" (+{diff})" if diff > 0 else f" ({diff})" if diff < 0 else ""
             left_lines.append(f"{ship}: {cnt}{diff_str}")
 
-        right_lines = ["Categories:"] + [f"{g}: {c}" for g, c in sorted_groups]
+        right_data = []
+        for grp, cnt in sorted_groups:
+            grp_diff = group_diffs.get(grp, 0)
+            diff_str = f" (+{grp_diff})" if grp_diff > 0 else f" ({grp_diff})" if grp_diff < 0 else ""
+            right_data.append((grp, cnt, grp_diff, f"{grp}: {cnt}{diff_str}"))
 
-        left_text, right_text = '\n'.join(left_lines), '\n'.join(right_lines)
+        left_text = '\n'.join(left_lines)
+        right_text = '\n'.join(["Categories:"] + [d[3] for d in right_data])
         left_w, left_h = utils.get_text_size_withnewline(left_text, (20, 20),
             font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
         right_w, right_h = utils.get_text_size_withnewline(right_text, (20, 20),
@@ -572,8 +601,13 @@ class DScanAnalyzer:
             y = utils.draw_text_on_image(im, line, (10, y), color=color,
                 bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
 
-        utils.draw_text_on_image(im, right_text, (left_w + 20, 20), color=(255, 255, 255),
-            bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        right_x, right_y = left_w + 20, 20
+        right_y = utils.draw_text_on_image(im, "Categories:", (right_x, right_y), color=(255, 255, 255),
+            bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
+        for grp, cnt, grp_diff, text in right_data:
+            color = (0, 255, 0) if grp_diff > 0 else (0, 0, 255) if grp_diff < 0 else (255, 255, 255)
+            right_y = utils.draw_text_on_image(im, text, (right_x, right_y), color=color,
+                bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
 
         return im
 
