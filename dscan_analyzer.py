@@ -63,7 +63,8 @@ class DScanAnalyzer:
         self.paused_time = 0
         self.pause_start_time = None
 
-        self.cache = CacheManager()
+        cache_dir = C.get('cache', 'cache')
+        self.cache = CacheManager(cache_dir)
         self.cache.load_cache()
         self.esi = ESIResolver()
 

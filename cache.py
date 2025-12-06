@@ -8,7 +8,7 @@ import pickle
 from loguru import logger
 
 class CacheManager:
-    def __init__(self, cache_dir='test_data/char_data'):
+    def __init__(self, cache_dir='cache'):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._trie = None

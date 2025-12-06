@@ -35,6 +35,7 @@ def dict2attrdict(dictionary):
 
 def create_default_config(fpath):
     default_config = {
+        'cache': 'cache',
         'logging': {
             'enabled': True,
             'level': 'INFO'

@@ -1,3 +1,4 @@
+cache: cache
 logging:
   enabled: true
   level: INFO
