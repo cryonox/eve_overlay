@@ -18,6 +18,8 @@ import json
 import threading
 from cache import CacheManager
 from zkill import ZKillStatsProvider, calc_danger
+import win32gui
+import win32api
 from evekill import EveKillStatsProvider
 from esi import ESIResolver
 
@@ -110,6 +112,9 @@ class DScanAnalyzer:
         self._network_thread: Optional[threading.Thread] = None
         self.last_clipboard: Optional[str] = None
         self.header_rect: Optional[tuple] = None
+        self.hovered_rect: Optional[str] = None
+        self.mouse_pos: tuple = (0, 0)
+        self.hover_color = tuple(C.dscan.get('hover_color', [80, 80, 80]))
 
         cv2.namedWindow(self.win_name, cv2.WINDOW_AUTOSIZE)
         cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
@@ -183,7 +188,10 @@ class DScanAnalyzer:
         cv2.waitKey(1)
 
     def mouse_callback(self, event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
+        self.mouse_pos = (x, y)
+        if event == cv2.EVENT_MOUSEMOVE:
+            self.update_hover_state(x, y)
+        elif event == cv2.EVENT_LBUTTONDOWN:
             if self.header_rect and self.last_clipboard:
                 hx, hy, hw, hh = self.header_rect
                 if hx <= x <= hx + hw and hy <= y <= hy + hh:
@@ -196,6 +204,55 @@ class DScanAnalyzer:
                 if rx <= x <= rx + rw and ry <= y <= ry + rh and link:
                     webbrowser.open(link)
                     break
+
+    def get_mouse_pos_in_window(self) -> Optional[tuple]:
+        try:
+            hwnd = win32gui.FindWindow('Main HighGUI class', self.win_name)
+            if not hwnd:
+                return None
+            cx, cy = win32api.GetCursorPos()
+            wx, wy, _, _ = win32gui.GetWindowRect(hwnd)
+            return (cx - wx, cy - wy)
+        except:
+            return None
+
+    def update_hover_state_global(self):
+        if not self.transparency_on:
+            return
+        pos = self.get_mouse_pos_in_window()
+        if not pos:
+            self.hovered_rect = None
+            return
+        x, y = pos
+        self.update_hover_state(x, y)
+
+    def update_hover_state(self, x: int, y: int):
+        new_hovered = None
+        if self.header_rect and self.last_clipboard:
+            hx, hy, hw, hh = self.header_rect
+            if hx <= x <= hx + hw and hy <= y <= hy + hh:
+                new_hovered = '__header__'
+        if not new_hovered:
+            for name, (rect, link) in self.char_rects.items():
+                if link:
+                    rx, ry, rw, rh = rect
+                    if rx <= x <= rx + rw and ry <= y <= ry + rh:
+                        new_hovered = name
+                        break
+        self.hovered_rect = new_hovered
+
+    def apply_hover_highlight(self, im: np.ndarray) -> np.ndarray:
+        if not self.hovered_rect or self.transparency_on:
+            return im
+        im = im.copy()
+        if self.hovered_rect == '__header__' and self.header_rect:
+            hx, hy, hw, hh = self.header_rect
+            cv2.rectangle(im, (hx - 2, hy - 2), (hx + hw + 2, hy + hh + 2), self.hover_color, 2)
+        elif self.hovered_rect in self.char_rects:
+            rect, _ = self.char_rects[self.hovered_rect]
+            rx, ry, rw, rh = rect
+            cv2.rectangle(im, (rx - 2, ry - 2), (rx + rw + 2, ry + rh + 2), self.hover_color, 2)
+        return im
 
     def should_ignore_pilot(self, pilot: PilotData) -> bool:
         if pilot.corp_name and pilot.corp_name in self.ignore:
@@ -765,7 +822,8 @@ class DScanAnalyzer:
                     im = self.create_dscan_display()
 
                 if im is not None:
-                    cv2.imshow(self.win_name, im)
+                    disp_im = self.apply_hover_highlight(im)
+                    cv2.imshow(self.win_name, disp_im)
                 self.last_result_im = im
                 cv2.waitKey(100)
                 self.handle_transparency()
