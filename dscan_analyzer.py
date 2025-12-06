@@ -1,7 +1,6 @@
 import pyperclip
 import time
 from enum import Enum, auto
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Dict, List
 import asyncio
@@ -16,7 +15,9 @@ from loguru import logger
 import json
 import threading
 from cache import CacheManager
-from base_api_client import APIClientFactory
+from zkill import ZKillStatsProvider
+from evekill import EveKillStatsProvider
+from esi import ESIResolver
 
 
 class PilotState(Enum):
@@ -26,6 +27,7 @@ class PilotState(Enum):
     FOUND = auto()
     NOT_FOUND = auto()
     ERROR = auto()
+    RATE_LIMITED = auto()
 
 
 @dataclass
@@ -42,136 +44,12 @@ class PilotData:
     error_msg: Optional[str] = None
 
 
-class StatsInterface(ABC):
-    @abstractmethod
-    async def get_stats(self, session: aiohttp.ClientSession, char_id: int) -> Dict:
-        pass
-
-    @abstractmethod
-    def get_link(self, char_id: int) -> str:
-        pass
-
-    @abstractmethod
-    def extract_display_stats(self, stats: Dict) -> Dict:
-        pass
-
-
-class ZKillStatsProvider(StatsInterface):
-    def __init__(self):
-        self.client = APIClientFactory.create_client('zkill')
-
-    async def get_stats(self, session: aiohttp.ClientSession, char_id: int) -> Dict:
-        return await self.client._get_char_short_stats_with_session(session, char_id)
-
-    def get_link(self, char_id: int) -> str:
-        return f"https://zkillboard.com/character/{char_id}/"
-
-    def extract_display_stats(self, stats: Dict) -> Dict:
-        if not stats or 'error' in stats:
-            return {}
-        return {
-            'danger': stats.get('dangerRatio', 0),
-            'kills': stats.get('shipsDestroyed', 0),
-            'losses': stats.get('shipsLost', 0)
-        }
-
-
-class EveKillStatsProvider(StatsInterface):
-    def __init__(self):
-        self.client = APIClientFactory.create_client('evekill')
-
-    async def get_stats(self, session: aiohttp.ClientSession, char_id: int) -> Dict:
-        return await self.client._get_char_short_stats_with_session(session, char_id)
-
-    def get_link(self, char_id: int) -> str:
-        return f"https://eve-kill.com/character/{char_id}"
-
-    def extract_display_stats(self, stats: Dict) -> Dict:
-        if not stats or 'error' in stats:
-            return {}
-        return {
-            'danger': stats.get('dangerRatio', 0),
-            'kills': stats.get('kills', 0),
-            'losses': stats.get('losses', 0)
-        }
-
-
-class ESIResolver:
-    def __init__(self):
-        self.char_cache = {}
-        self.name_cache = {}
-
-    async def resolve_names_to_ids(self, session: aiohttp.ClientSession, names: List[str]) -> Dict[str, int]:
-        uncached = [n for n in names if n not in self.name_cache]
-        if not uncached:
-            return {n: self.name_cache[n] for n in names if n in self.name_cache}
-
-        res = {}
-        for i in range(0, len(uncached), 500):
-            chunk = uncached[i:i+500]
-            url = "https://esi.evetech.net/latest/universe/ids/"
-            try:
-                async with session.post(url, json=chunk, timeout=30) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        for char in data.get('characters', []):
-                            self.name_cache[char['name']] = char['id']
-                            res[char['name']] = char['id']
-            except Exception as e:
-                logger.info(f"ESI name resolution error: {e}")
-
-        for n in names:
-            if n in self.name_cache and n not in res:
-                res[n] = self.name_cache[n]
-        return res
-
-    async def get_char_info(self, session: aiohttp.ClientSession, char_id: int) -> Dict:
-        if char_id in self.char_cache:
-            return self.char_cache[char_id]
-
-        url = f"https://esi.evetech.net/latest/characters/{char_id}/"
-        try:
-            async with session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    info = {
-                        'corporation_id': data.get('corporation_id'),
-                        'alliance_id': data.get('alliance_id')
-                    }
-                    self.char_cache[char_id] = info
-                    return info
-        except Exception as e:
-            logger.info(f"ESI char info error for {char_id}: {e}")
-        return {}
-
-    async def resolve_ids_to_names(self, session: aiohttp.ClientSession, ids: List[int]) -> Dict[int, str]:
-        if not ids:
-            return {}
-
-        ids = list(set(i for i in ids if i and i != 0))
-        res = {}
-
-        for i in range(0, len(ids), 1000):
-            chunk = ids[i:i+1000]
-            url = "https://esi.evetech.net/latest/universe/names/"
-            try:
-                async with session.post(url, json=chunk, timeout=30) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        for item in data:
-                            res[item['id']] = item['name']
-            except Exception as e:
-                logger.info(f"ESI id resolution error: {e}")
-
-        return res
-
-
 class DScanAnalyzer:
     def __init__(self):
         self.ignore_alliances = C.dscan.get('ignore_alliances', [])
         self.ignore_corps = C.dscan.get('ignore_corps', [])
         self.display_duration = C.dscan.get('timeout', 10)
-        self.stats_limit = C.dscan.get('zkill_limit', 50)
+        self.stats_limit = C.dscan.get('aggregated_mode_threshold', 50)
         self.win_name = "D-Scan Analysis"
         self.transparency_on = C.dscan.get('transparency_on', True)
         self.transparency = C.dscan.get('transparency', 180)
@@ -188,7 +66,8 @@ class DScanAnalyzer:
         self.esi = ESIResolver()
 
         stats_provider = C.dscan.get('stats_provider', 'zkill')
-        self.stats_provider = ZKillStatsProvider() if stats_provider == 'zkill' else EveKillStatsProvider()
+        rate_limit_delay = C.dscan.get('rate_limit_retry_delay', 5)
+        self.stats_provider = ZKillStatsProvider(rate_limit_delay) if stats_provider == 'zkill' else EveKillStatsProvider(rate_limit_delay)
 
         self.pilots: Dict[str, PilotData] = {}
         self.pending_tasks: Dict[str, asyncio.Task] = {}
@@ -271,7 +150,7 @@ class DScanAnalyzer:
             return True
         return False
 
-    async def lookup_pilot_async(self, pilot: PilotData, session: aiohttp.ClientSession):
+    async def lookup_pilot_async(self, pilot: PilotData, session: aiohttp.ClientSession, skip_stats: bool = False):
         try:
             if pilot.char_id is None:
                 name_map = await self.esi.resolve_names_to_ids(session, [pilot.name])
@@ -291,15 +170,22 @@ class DScanAnalyzer:
                     pilot.corp_name = names.get(pilot.corp_id, 'Unknown')
                     pilot.alliance_name = names.get(pilot.alliance_id) if pilot.alliance_id else None
 
-            pilot.state = PilotState.SEARCHING_STATS
             pilot.stats_link = self.stats_provider.get_link(pilot.char_id)
 
+            if skip_stats:
+                pilot.state = PilotState.FOUND
+                return
+
+            pilot.state = PilotState.SEARCHING_STATS
             stats = await self.stats_provider.get_stats(session, pilot.char_id)
             if stats and 'error' not in stats:
                 pilot.stats = self.stats_provider.extract_display_stats(stats)
                 pilot.state = PilotState.FOUND
             elif stats and stats.get('error') == 'not_found':
                 pilot.state = PilotState.NOT_FOUND
+            elif stats and stats.get('error') == 'rate_limited':
+                pilot.state = PilotState.RATE_LIMITED
+                pilot.error_msg = f"Retry in {int(stats.get('retry_after', 0))}s"
             else:
                 pilot.state = PilotState.ERROR
                 pilot.error_msg = stats.get('error', 'unknown') if stats else 'unknown'
@@ -338,6 +224,8 @@ class DScanAnalyzer:
                     char_info = self.esi.char_cache[char_id]
                     pilot.corp_id = char_info.get('corporation_id')
                     pilot.alliance_id = char_info.get('alliance_id')
+                    pilot.corp_name = self.esi.id_name_cache.get(pilot.corp_id, 'Unknown') if pilot.corp_id else None
+                    pilot.alliance_name = self.esi.id_name_cache.get(pilot.alliance_id) if pilot.alliance_id else None
                 if char_id in stats_cache:
                     stats = stats_cache[char_id]
                     if stats and 'error' not in stats:
@@ -385,7 +273,7 @@ class DScanAnalyzer:
         connector = aiohttp.TCPConnector(limit=50)
         async with aiohttp.ClientSession(connector=connector) as session:
             if pilots_esi:
-                esi_tasks = [self.lookup_pilot_async(p, session) for p in pilots_esi]
+                esi_tasks = [self.lookup_pilot_async(p, session, skip_stats) for p in pilots_esi]
                 await asyncio.gather(*esi_tasks, return_exceptions=True)
 
             if not skip_stats and pilots_stats:
@@ -403,6 +291,9 @@ class DScanAnalyzer:
                 pilot.state = PilotState.FOUND
             elif stats and stats.get('error') == 'not_found':
                 pilot.state = PilotState.NOT_FOUND
+            elif stats and stats.get('error') == 'rate_limited':
+                pilot.state = PilotState.RATE_LIMITED
+                pilot.error_msg = f"Retry in {int(stats.get('retry_after', 0))}s"
             else:
                 pilot.state = PilotState.ERROR
         except Exception as e:
@@ -487,6 +378,9 @@ class DScanAnalyzer:
             elif pilot.state == PilotState.ERROR:
                 entry['text'] = f"{entry['name']} | Error"
                 entry['color'] = (0, 0, 255)
+            elif pilot.state == PilotState.RATE_LIMITED:
+                entry['text'] = f"{entry['name']} | Rate limited"
+                entry['color'] = (0, 165, 255)
             elif pilot.state in [PilotState.CACHE_HIT, PilotState.FOUND]:
                 if pilot.stats:
                     d, k, l = pilot.stats.get('danger', 0), pilot.stats.get('kills', 0), pilot.stats.get('losses', 0)

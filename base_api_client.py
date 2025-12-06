@@ -1,13 +1,16 @@
 import asyncio
 import aiohttp
+import time
 from abc import ABC, abstractmethod
 from loguru import logger
 
 class BaseAPIClient(ABC):
-    def __init__(self, max_concurrent=50):
+    def __init__(self, max_concurrent=50, rate_limit_retry_delay=5):
         self.user_agent = "Eve Overlay"
         self.cache = {}
+        self.rate_limit_cache = {}
         self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.rate_limit_retry_delay = rate_limit_retry_delay
 
     @property
     @abstractmethod
@@ -42,6 +45,12 @@ class BaseAPIClient(ABC):
             logger.debug(f"{self.__class__.__name__} cache hit for char {char_id}")
             return self.cache[char_id]
 
+        if char_id in self.rate_limit_cache:
+            expire_time = self.rate_limit_cache[char_id]
+            if time.time() < expire_time:
+                return {'error': 'rate_limited', 'retry_after': expire_time - time.time()}
+            del self.rate_limit_cache[char_id]
+
         async with self.semaphore:
             for attempt in range(max_retries + 1):
                 try:
@@ -56,27 +65,44 @@ class BaseAPIClient(ABC):
                                 self.cache[char_id] = processed_data
                             return processed_data
                         elif response.status in [429, 1015]:
-                            logger.error(f"{self.__class__.__name__} rate limited for char {char_id}")
-                            return {'error': 'rate_limited'}
+                            if attempt < max_retries:
+                                logger.warning(f"{self.__class__.__name__} rate limited for char {char_id}, retrying in {self.rate_limit_retry_delay}s")
+                                await asyncio.sleep(self.rate_limit_retry_delay)
+                                continue
+                            logger.error(f"{self.__class__.__name__} rate limited for char {char_id}, max retries exceeded")
+                            self.rate_limit_cache[char_id] = time.time() + self.rate_limit_retry_delay
+                            return {'error': 'rate_limited', 'retry_after': self.rate_limit_retry_delay}
                         elif response.status == 404:
-                            return {'error': 'not_found'}
+                            try:
+                                err_data = await response.json()
+                                err_msg = err_data.get('message', 'Not Found')
+                            except Exception:
+                                err_msg = 'Not Found'
+                            logger.error(f"{self.__class__.__name__} 404 for char {char_id}: {err_msg}")
+                            return {'error': 'not_found', 'message': err_msg}
                         else:
-                            logger.error(f"{self.__class__.__name__} API error for char {char_id}: status {response.status}")
-                            return {'error': 'api_error', 'status': response.status}
+                            try:
+                                err_data = await response.json()
+                                err_msg = err_data.get('message', str(err_data))
+                            except Exception:
+                                err_msg = await response.text()
+                            logger.error(f"{self.__class__.__name__} API error for char {char_id}: status {response.status}, msg: {err_msg}")
+                            return {'error': 'api_error', 'status': response.status, 'message': err_msg}
                 except Exception as e:
                     if attempt < max_retries:
                         wait_time = (2 ** attempt) * 2
-                        logger.error(f"{self.__class__.__name__} network error for char {char_id}, retrying in {wait_time}s: {e}")
+                        logger.error(f"{self.__class__.__name__} network error for char {char_id}, retrying in {wait_time}s: {type(e).__name__}: {e}")
                         await asyncio.sleep(wait_time)
                         continue
-                    logger.error(f"{self.__class__.__name__} failed fetching data for {char_id}: {e}")
-                    return {'error': 'network_error'}
+                    logger.error(f"{self.__class__.__name__} failed fetching data for {char_id}: {type(e).__name__}: {e}")
+                    return {'error': 'network_error', 'message': f"{type(e).__name__}: {e}"}
 
             logger.error(f"{self.__class__.__name__} max retries exceeded for char {char_id}")
             return {'error': 'max_retries_exceeded'}
     
     def clear_cache(self):
         self.cache = {}
+        self.rate_limit_cache = {}
 
 class APIClientFactory:
     @staticmethod

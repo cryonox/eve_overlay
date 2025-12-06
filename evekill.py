@@ -1,12 +1,14 @@
-
 import asyncio
 import aiohttp
 from loguru import logger
 import json
 import time
 from pathlib import Path
+from typing import Dict
 from base_api_client import BaseAPIClient
 from tqdm import tqdm
+from zkill import StatsInterface
+
 
 class EveKillClient(BaseAPIClient):
     @property
@@ -213,3 +215,24 @@ class EveKillClient(BaseAPIClient):
             with open(batch_file, 'w', encoding='utf-8') as f:
                 json.dump(cur_batch_data, f, indent=2, ensure_ascii=False)
         return
+
+
+class EveKillStatsProvider(StatsInterface):
+    def __init__(self, rate_limit_retry_delay=5):
+        from base_api_client import APIClientFactory
+        self.client = APIClientFactory.create_client('evekill', rate_limit_retry_delay=rate_limit_retry_delay)
+
+    async def get_stats(self, session: aiohttp.ClientSession, char_id: int) -> Dict:
+        return await self.client._get_char_short_stats_with_session(session, char_id)
+
+    def get_link(self, char_id: int) -> str:
+        return f"https://eve-kill.com/character/{char_id}"
+
+    def extract_display_stats(self, stats: Dict) -> Dict:
+        if not stats or 'error' in stats:
+            return {}
+        return {
+            'danger': stats.get('dangerRatio', 0),
+            'kills': stats.get('kills', 0),
+            'losses': stats.get('losses', 0)
+        }
