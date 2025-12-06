@@ -42,8 +42,7 @@ def create_default_config(fpath):
         },
         'dscan': {
             'enabled': True,
-            'ignore_alliances': [],
-            'ignore_corps': [],
+            'ignore': [],
             'hotkey_transparency': 'alt+shift+f',
             'hotkey_mode': 'alt+shift+m',
             'hotkey_clear_cache': 'alt+shift+e',

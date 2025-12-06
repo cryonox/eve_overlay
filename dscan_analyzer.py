@@ -49,8 +49,7 @@ class PilotData:
 
 class DScanAnalyzer:
     def __init__(self):
-        self.ignore_alliances = C.dscan.get('ignore_alliances', [])
-        self.ignore_corps = C.dscan.get('ignore_corps', [])
+        self.ignore = C.dscan.get('ignore', [])
         self.display_duration = C.dscan.get('timeout', 10)
         self.stats_limit = C.dscan.get('aggregated_mode_threshold', 50)
         self.win_name = "D-Scan Analysis"
@@ -175,9 +174,9 @@ class DScanAnalyzer:
                     break
 
     def should_ignore_pilot(self, pilot: PilotData) -> bool:
-        if pilot.corp_name and pilot.corp_name in self.ignore_corps:
+        if pilot.corp_name and pilot.corp_name in self.ignore:
             return True
-        if pilot.alliance_name and pilot.alliance_name in self.ignore_alliances:
+        if pilot.alliance_name and pilot.alliance_name in self.ignore:
             return True
         return False
 
@@ -511,8 +510,6 @@ class DScanAnalyzer:
 
         corp_counts, alliance_counts, group_counts = {}, {}, {grp['name']: 0 for grp in self.groups}
         for pilot in self.pilots.values():
-            if self.should_ignore_pilot(pilot):
-                continue
             corp = pilot.corp_name or 'Unknown'
             corp_counts[corp] = corp_counts.get(corp, 0) + 1
             if pilot.alliance_name:
@@ -531,7 +528,7 @@ class DScanAnalyzer:
 
         remaining = max(0, self.display_duration - self.get_elapsed_time())
 
-        total_pilots = sum(1 for p in self.pilots.values() if not self.should_ignore_pilot(p))
+        total_pilots = len(self.pilots)
         header_parts = [(f"{total_pilots} | {remaining:.0f}s", (0, 255, 0))]
         for grp in self.groups:
             cnt = group_counts.get(grp['name'], 0)

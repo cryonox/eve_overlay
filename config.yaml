@@ -12,8 +12,7 @@ dscan:
   stats_provider: zkill
   rate_limit_retry_delay: 5
   aggregated_mode_threshold: 50
-  ignore_alliances: []
-  ignore_corps: []
+  ignore: []
   timeout: 10
   diff_timeout: 60
   group_rect_width: 3
