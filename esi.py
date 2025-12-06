@@ -1,7 +1,7 @@
-
 import asyncio
 import aiohttp
-import json
+from loguru import logger
+
 
 class ESIClient:
     def __init__(self):
@@ -45,22 +45,21 @@ class ESIClient:
         return all_res
     
     async def _resolve_ids_batch(self, session, ids):
-        """Resolve batch of IDs to names"""
         if not ids:
             return {}
-            
+
         url = "https://esi.evetech.net/latest/universe/names/"
-        
+
         try:
             async with session.post(url, json=ids, timeout=30) as response:
                 if response.status != 200:
-                    print(f"ESI error: {response.status}")
+                    logger.warning(f"ESI error: {response.status}")
                     return {}
-                    
+
                 data = await response.json()
                 return {item['id']: item['name'] for item in data}
         except Exception as e:
-            print(f"Error resolving IDs: {e}")
+            logger.warning(f"Error resolving IDs: {e}")
             return {}
 
     async def names_to_ids(self, names):
@@ -106,23 +105,21 @@ class ESIClient:
         return all_res
 
     async def _resolve_names_batch(self, session, names):
-        """Resolve batch of names to IDs"""
         if not names:
             return {}
-        
+
         url = "https://esi.evetech.net/latest/universe/ids/"
-        print(f"Sending {len(names)} names to ESI: {names[:5]}...")  # Debug
-        
+        logger.debug(f"Sending {len(names)} names to ESI: {names[:5]}...")
+
         try:
             async with session.post(url, json=names, timeout=30) as response:
                 if response.status != 200:
-                    print(f"ESI error: {response.status}")
                     response_text = await response.text()
-                    print(f"Response: {response_text}")
+                    logger.warning(f"ESI error: {response.status} - {response_text}")
                     return {}
-                
+
                 data = await response.json()
                 return {char['name']: char['id'] for char in data.get('characters', [])}
         except Exception as e:
-            print(f"Error resolving names: {e}")
+            logger.warning(f"Error resolving names: {e}")
             return {}

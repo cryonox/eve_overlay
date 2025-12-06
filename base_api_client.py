@@ -39,14 +39,15 @@ class BaseAPIClient(ABC):
 
     async def _get_char_short_stats_with_session(self, session, char_id, max_retries=3):
         if char_id in self.cache:
+            logger.debug(f"{self.__class__.__name__} cache hit for char {char_id}")
             return self.cache[char_id]
-        
+
         async with self.semaphore:
             for attempt in range(max_retries + 1):
                 try:
                     url = self._build_url(char_id)
                     headers = {'User-Agent': self.user_agent}
-                    
+
                     async with session.get(url, headers=headers, timeout=10) as response:
                         if response.status == 200:
                             data = await response.json()
@@ -55,20 +56,23 @@ class BaseAPIClient(ABC):
                                 self.cache[char_id] = processed_data
                             return processed_data
                         elif response.status in [429, 1015]:
+                            logger.error(f"{self.__class__.__name__} rate limited for char {char_id}")
                             return {'error': 'rate_limited'}
                         elif response.status == 404:
                             return {'error': 'not_found'}
                         else:
+                            logger.error(f"{self.__class__.__name__} API error for char {char_id}: status {response.status}")
                             return {'error': 'api_error', 'status': response.status}
                 except Exception as e:
                     if attempt < max_retries:
                         wait_time = (2 ** attempt) * 2
-                        logger.info(f"{self.__class__.__name__} network error for char {char_id}, retrying in {wait_time}s: {e}")
+                        logger.error(f"{self.__class__.__name__} network error for char {char_id}, retrying in {wait_time}s: {e}")
                         await asyncio.sleep(wait_time)
                         continue
-                    logger.info(f"Error fetching {self.__class__.__name__} data for {char_id}: {e}")
+                    logger.error(f"{self.__class__.__name__} failed fetching data for {char_id}: {e}")
                     return {'error': 'network_error'}
-            
+
+            logger.error(f"{self.__class__.__name__} max retries exceeded for char {char_id}")
             return {'error': 'max_retries_exceeded'}
     
     def clear_cache(self):
