@@ -9,13 +9,14 @@ dscan:
   font_thickness: 1
   hotkey_transparency: alt+shift+f
   hotkey_mode: alt+shift+m
-  stats_provider: zkill
+  stats_provider: evekill 
   rate_limit_retry_delay: 5
-  aggregated_mode_threshold: 300
+  aggregated_mode_threshold: 50
   ignore_alliances: []
   ignore_corps: []
   timeout: 10
   diff_timeout: 60
+  group_rect_width: 3
   transparency: 180
   transparency_color: [64, 64, 64]
   transparency_on: true

@@ -66,6 +66,16 @@ class DScanAnalyzer:
         self.paused_time = 0
         self.pause_start_time = None
 
+        self.groups = []
+        self.entity_to_group = {}
+        groups_cfg = C.dscan.get('groups', {})
+        for grp_name, grp_data in groups_cfg.items():
+            entities = grp_data.get('entities', [])
+            color = tuple(grp_data.get('color', [255, 255, 255]))
+            self.groups.append({'name': grp_name, 'entities': set(entities), 'color': color})
+            for entity in entities:
+                self.entity_to_group[entity] = {'name': grp_name, 'color': color, 'order': len(self.groups) - 1}
+
         cache_dir = C.get('cache', 'cache')
         self.cache = CacheManager(cache_dir)
         self.cache.load_cache()
@@ -170,6 +180,13 @@ class DScanAnalyzer:
         if pilot.alliance_name and pilot.alliance_name in self.ignore_alliances:
             return True
         return False
+
+    def get_pilot_group(self, pilot: PilotData) -> Optional[Dict]:
+        if pilot.alliance_name and pilot.alliance_name in self.entity_to_group:
+            return self.entity_to_group[pilot.alliance_name]
+        if pilot.corp_name and pilot.corp_name in self.entity_to_group:
+            return self.entity_to_group[pilot.corp_name]
+        return None
 
     async def lookup_pilot_async(self, pilot: PilotData, session: aiohttp.ClientSession, skip_stats: bool = False):
         try:
@@ -415,12 +432,15 @@ class DScanAnalyzer:
 
         self.char_rects = {}
         display_data = []
+        rect_w = C.dscan.get('group_rect_width', 3)
 
         for name, pilot in self.pilots.items():
             if self.should_ignore_pilot(pilot):
                 continue
 
             entry = {'name': name[:20], 'pilot': pilot, 'link': pilot.stats_link}
+            grp = self.get_pilot_group(pilot)
+            entry['group'] = grp
 
             if pilot.state == PilotState.SEARCHING_ESI:
                 entry['text'] = f"{entry['name']} | Resolving..."
@@ -462,21 +482,26 @@ class DScanAnalyzer:
         text_lines = [header] + [e['text'] for e in display_data]
         full_text = '\n'.join(text_lines)
 
+        has_groups = any(e.get('group') for e in display_data)
+        x_offset = rect_w + 2 if has_groups else 0
+
         max_w, total_h = utils.get_text_size_withnewline(full_text, (20, 20),
             font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        im = np.full((total_h + 40, max_w + 40, 3), C.dscan.transparency_color, np.uint8)
+        im = np.full((total_h + 40, max_w + 40 + x_offset, 3), C.dscan.transparency_color, np.uint8)
 
         y = 20
-        y = utils.draw_text_on_image(im, header, (10, y), color=(0, 255, 0),
+        y = utils.draw_text_on_image(im, header, (10 + x_offset, y), color=(0, 255, 0),
             bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
 
         for entry in display_data:
             text_size, _ = cv2.getTextSize(entry['text'], cv2.FONT_HERSHEY_SIMPLEX,
                 C.dscan.font_scale, int(C.dscan.font_thickness))
             start_y = y
-            y = utils.draw_text_on_image(im, entry['text'], (10, y), color=entry['color'],
+            y = utils.draw_text_on_image(im, entry['text'], (10 + x_offset, y), color=entry['color'],
                 bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
-            self.char_rects[entry['name']] = ((10, start_y, text_size[0], y - start_y), entry['link'])
+            if entry.get('group'):
+                cv2.rectangle(im, (4, start_y), (4 + rect_w, y - 2), entry['group']['color'], -1)
+            self.char_rects[entry['name']] = ((10 + x_offset, start_y, text_size[0], y - start_y), entry['link'])
 
         return im
 
@@ -484,7 +509,7 @@ class DScanAnalyzer:
         if not self.pilots:
             return None
 
-        corp_counts, alliance_counts = {}, {}
+        corp_counts, alliance_counts, group_counts = {}, {}, {grp['name']: 0 for grp in self.groups}
         for pilot in self.pilots.values():
             if self.should_ignore_pilot(pilot):
                 continue
@@ -492,29 +517,73 @@ class DScanAnalyzer:
             corp_counts[corp] = corp_counts.get(corp, 0) + 1
             if pilot.alliance_name:
                 alliance_counts[pilot.alliance_name] = alliance_counts.get(pilot.alliance_name, 0) + 1
+            grp = self.get_pilot_group(pilot)
+            if grp:
+                group_counts[grp['name']] += 1
+
+        def sort_key(item):
+            name, cnt = item
+            grp = self.entity_to_group.get(name)
+            return (0, grp['order'], -cnt) if grp else (1, -cnt, name)
+
+        sorted_alliances = sorted(alliance_counts.items(), key=sort_key)
+        sorted_corps = sorted(corp_counts.items(), key=sort_key)
 
         remaining = max(0, self.display_duration - self.get_elapsed_time())
-        header = f"{len(self.pilots)} | {remaining:.0f}s"
 
-        left_lines = [header, "Alliances:"]
-        left_lines += [f"  {a}: {c}" for a, c in sorted(alliance_counts.items(), key=lambda x: x[1], reverse=True)] or ["  None"]
+        total_pilots = sum(1 for p in self.pilots.values() if not self.should_ignore_pilot(p))
+        header_parts = [(f"{total_pilots} | {remaining:.0f}s", (0, 255, 0))]
+        for grp in self.groups:
+            cnt = group_counts.get(grp['name'], 0)
+            if cnt > 0:
+                header_parts.append((f" {grp['name']}:{cnt}", grp['color']))
 
-        right_lines = ["", "Corporations:"]
-        right_lines += [f"  {c}: {n}" for c, n in sorted(corp_counts.items(), key=lambda x: x[1], reverse=True)]
+        left_lines_data = [("Alliances:", (255, 255, 255))]
+        for a, c in sorted_alliances:
+            grp = self.entity_to_group.get(a)
+            color = grp['color'] if grp else (255, 255, 255)
+            left_lines_data.append((f"  {a}: {c}", color))
+        if not sorted_alliances:
+            left_lines_data.append(("  None", (128, 128, 128)))
 
-        left_text, right_text = '\n'.join(left_lines), '\n'.join(right_lines)
+        right_lines_data = [("Corporations:", (255, 255, 255))]
+        for c, n in sorted_corps:
+            grp = self.entity_to_group.get(c)
+            color = grp['color'] if grp else (255, 255, 255)
+            right_lines_data.append((f"  {c}: {n}", color))
+
+        header_text = ''.join(p[0] for p in header_parts)
+        left_text = '\n'.join(d[0] for d in left_lines_data)
+        right_text = '\n'.join(d[0] for d in right_lines_data)
+
+        header_w, header_h = utils.get_text_size_withnewline(header_text, (20, 20),
+            font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
         left_w, left_h = utils.get_text_size_withnewline(left_text, (20, 20),
             font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
         right_w, right_h = utils.get_text_size_withnewline(right_text, (20, 20),
             font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
 
-        total_w, total_h = left_w + right_w + 30, max(left_h, right_h) + 40
+        content_w = left_w + right_w + 30
+        total_w = max(header_w + 20, content_w)
+        total_h = header_h + max(left_h, right_h) + 40
         im = np.full((total_h, total_w, 3), C.dscan.transparency_color, np.uint8)
 
-        utils.draw_text_on_image(im, left_text, (10, 20), color=(255, 255, 255),
-            bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        utils.draw_text_on_image(im, right_text, (left_w + 20, 20), color=(255, 255, 255),
-            bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+        x = 10
+        for text, color in header_parts:
+            text_w, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, C.dscan.font_scale, int(C.dscan.font_thickness))[0]
+            utils.draw_text_on_image(im, text, (x, 20), color=color,
+                bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
+            x += text_w
+
+        y = 20 + header_h
+        for text, color in left_lines_data:
+            y = utils.draw_text_on_image(im, text, (10, y), color=color,
+                bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
+
+        y = 20 + header_h
+        for text, color in right_lines_data:
+            y = utils.draw_text_on_image(im, text, (left_w + 20, y), color=color,
+                bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
 
         return im
 
