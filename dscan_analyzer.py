@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, List
 import asyncio
 import aiohttp
+import requests
 from config import C
 import cv2
 import numpy as np
@@ -19,6 +20,21 @@ from cache import CacheManager
 from zkill import ZKillStatsProvider, calc_danger
 from evekill import EveKillStatsProvider
 from esi import ESIResolver
+
+
+def get_dscan_info_url(paste_data: str) -> Optional[str]:
+    try:
+        ts = int(time.time() * 1000)
+        resp = requests.post(f"https://dscan.info/?_={ts}", data={"paste": paste_data}, timeout=10)
+        if resp.status_code != 200:
+            return None
+        txt = resp.text.strip()
+        if txt.startswith("OK;"):
+            return f"https://dscan.info/v/{txt.split(';')[1]}"
+        return None
+    except Exception as e:
+        logger.info(f"dscan.info request failed: {e}")
+        return None
 
 
 class PilotState(Enum):
@@ -92,6 +108,8 @@ class DScanAnalyzer:
         self.last_dscan_time = None
         self.aggregated_mode = False
         self._network_thread: Optional[threading.Thread] = None
+        self.last_clipboard: Optional[str] = None
+        self.header_rect: Optional[tuple] = None
 
         cv2.namedWindow(self.win_name, cv2.WINDOW_AUTOSIZE)
         cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
@@ -166,7 +184,14 @@ class DScanAnalyzer:
 
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
-            for char_name, (rect, link) in self.char_rects.items():
+            if self.header_rect and self.last_clipboard:
+                hx, hy, hw, hh = self.header_rect
+                if hx <= x <= hx + hw and hy <= y <= hy + hh:
+                    url = get_dscan_info_url(self.last_clipboard)
+                    if url:
+                        webbrowser.open(url)
+                    return
+            for _, (rect, link) in self.char_rects.items():
                 rx, ry, rw, rh = rect
                 if rx <= x <= rx + rw and ry <= y <= ry + rh and link:
                     webbrowser.open(link)
@@ -499,8 +524,11 @@ class DScanAnalyzer:
             font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
         im = np.full((total_h + 40, max_w + 40 + x_offset, 3), C.dscan.transparency_color, np.uint8)
 
-        y = 20
-        y = utils.draw_text_on_image(im, header, (10 + x_offset, y), color=(0, 255, 0),
+        header_x = 10 + x_offset
+        header_y = 20
+        header_w, header_h = cv2.getTextSize(header, cv2.FONT_HERSHEY_SIMPLEX, C.dscan.font_scale, int(C.dscan.font_thickness))[0]
+        self.header_rect = (header_x, header_y, header_w, header_h)
+        y = utils.draw_text_on_image(im, header, (header_x, header_y), color=(0, 255, 0),
             bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
 
         for entry in display_data:
@@ -584,6 +612,7 @@ class DScanAnalyzer:
         total_h = header_h + max(left_h, right_h) + 40
         im = np.full((total_h, total_w, 3), C.dscan.transparency_color, np.uint8)
 
+        self.header_rect = (10, 20, header_w, header_h)
         x = 10
         for text, color in header_parts:
             text_w, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, C.dscan.font_scale, int(C.dscan.font_thickness))[0]
@@ -674,6 +703,9 @@ class DScanAnalyzer:
         total_w, total_h = left_w + right_w + 30, max(left_h, right_h) + 40
         im = np.full((total_h, total_w, 3), C.dscan.transparency_color, np.uint8)
 
+        header_w, header_h = cv2.getTextSize(header, cv2.FONT_HERSHEY_SIMPLEX, C.dscan.font_scale, int(C.dscan.font_thickness))[0]
+        self.header_rect = (10, 20, header_w, header_h)
+
         y = 20
         for i, line in enumerate(left_lines):
             if i < 1:
@@ -715,6 +747,7 @@ class DScanAnalyzer:
                     utils.tick()
                     self.parse_clipboard(cur_clipboard)
                     self.last_result_total_time = utils.tock()
+                    self.last_clipboard = cur_clipboard
                     last_clipboard = cur_clipboard
 
                 if self.result_start_time and self.transparency_on:
