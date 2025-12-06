@@ -4,6 +4,11 @@ from typing import Dict
 from base_api_client import BaseAPIClient
 
 
+def calc_danger(kills: int, losses: int) -> int:
+    total = kills + losses
+    return int(100 * kills / total) if total > 0 else 0
+
+
 class StatsInterface(ABC):
     @abstractmethod
     async def get_stats(self, session: aiohttp.ClientSession, char_id: int) -> Dict:
@@ -46,8 +51,5 @@ class ZKillStatsProvider(StatsInterface):
     def extract_display_stats(self, stats: Dict) -> Dict:
         if not stats or 'error' in stats:
             return {}
-        return {
-            'danger': stats.get('dangerRatio', 0),
-            'kills': stats.get('shipsDestroyed', 0),
-            'losses': stats.get('shipsLost', 0)
-        }
+        kills, losses = stats.get('shipsDestroyed', 0), stats.get('shipsLost', 0)
+        return {'danger': calc_danger(kills, losses), 'kills': kills, 'losses': losses}

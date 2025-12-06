@@ -16,6 +16,7 @@ class CacheManager:
         self._name2tid = None
         self._tid2name = None
         self._char_info = None
+        self._stats = None
         self._corp_id_to_name = None
         self._alliance_id_to_name = None
         self._cache_loaded = False
@@ -87,6 +88,33 @@ class CacheManager:
                 logger.info("  Saving char info cache...")
                 with open(char_info_pkl_path, 'wb') as f:
                     pickle.dump(self._char_info, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        stats_path = self.cache_dir / 'stats.bin'
+        stats_pkl_path = self.cache_dir / 'stats.pkl'
+        if self._stats is None:
+            if stats_pkl_path.exists():
+                logger.info("  Loading stats (cached)...")
+                with open(stats_pkl_path, 'rb') as f:
+                    self._stats = pickle.load(f)
+                logger.info(f"  Stats loaded: {len(self._stats):,} total")
+            elif stats_path.exists():
+                logger.info("  Loading stats (first run)...")
+                with open(stats_path, 'rb') as f:
+                    data = f.read()
+                self._stats = [None] * expected_cnt
+                bio, idx = io.BytesIO(data), 0
+                while bio.tell() < len(data):
+                    try:
+                        kills, _ = leb128.i.decode_reader(bio)
+                        losses, _ = leb128.i.decode_reader(bio)
+                        self._stats[idx] = None if kills == 0 and losses == 0 else (kills, losses)
+                        idx += 1
+                    except:
+                        break
+                logger.info(f"  Stats loaded: {idx:,} total")
+                logger.info("  Saving stats cache...")
+                with open(stats_pkl_path, 'wb') as f:
+                    pickle.dump(self._stats, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         if mappings_path.exists():
             logger.info("  Loading precomputed mappings...")
@@ -321,6 +349,21 @@ class CacheManager:
             'corp_name': corp_name,
             'alliance_name': alliance_name
         }
+
+    def get_char_stats(self, char_name):
+        tid = self.get_tid(char_name)
+        if tid is None:
+            return None
+        if not self._stats or tid >= len(self._stats) or self._stats[tid] is None:
+            return None
+        kills, losses = self._stats[tid]
+        return {'kills': kills, 'losses': losses}
+
+    def get_stats_by_tid(self, tid):
+        if not self._stats or tid >= len(self._stats) or self._stats[tid] is None:
+            return None
+        kills, losses = self._stats[tid]
+        return {'kills': kills, 'losses': losses}
 
     def save_trie_pickle(self, trie, fpath):
         with open(fpath, 'wb') as f:

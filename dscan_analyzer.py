@@ -16,7 +16,7 @@ from loguru import logger
 import json
 import threading
 from cache import CacheManager
-from zkill import ZKillStatsProvider
+from zkill import ZKillStatsProvider, calc_danger
 from evekill import EveKillStatsProvider
 from esi import ESIResolver
 
@@ -221,10 +221,10 @@ class DScanAnalyzer:
             elif stats and stats.get('error') == 'not_found':
                 pilot.state = PilotState.NOT_FOUND
             elif stats and stats.get('error') == 'rate_limited':
-                pilot.state = PilotState.RATE_LIMITED
+                pilot.state = PilotState.CACHE_HIT if pilot.stats else PilotState.RATE_LIMITED
                 pilot.error_msg = f"Retry in {int(stats.get('retry_after', 0))}s"
             else:
-                pilot.state = PilotState.ERROR
+                pilot.state = PilotState.CACHE_HIT if pilot.stats else PilotState.ERROR
                 pilot.error_msg = stats.get('error', 'unknown') if stats else 'unknown'
 
         except Exception as e:
@@ -243,6 +243,21 @@ class DScanAnalyzer:
         pilot.corp_alliance_resolved = True
         return True
 
+    def _apply_stats_from_cache(self, pilot: PilotData, name: str, stats_cache: dict):
+        if pilot.char_id in stats_cache:
+            stats = stats_cache[pilot.char_id]
+            if stats and 'error' not in stats:
+                pilot.stats = self.stats_provider.extract_display_stats(stats)
+                pilot.state = PilotState.FOUND
+                return True
+        preloaded = self.cache.get_char_stats(name)
+        if preloaded:
+            k, l = preloaded['kills'], preloaded['losses']
+            pilot.stats = {'kills': k, 'losses': l, 'danger': calc_danger(k, l)}
+            pilot.state = PilotState.CACHE_HIT
+            return True
+        return False
+
     def process_cache_lookup(self, names: List[str]) -> Dict[str, PilotData]:
         pilots = {}
         stats_cache = self.stats_provider.client.cache
@@ -260,21 +275,13 @@ class DScanAnalyzer:
                     pilot.corp_name = info['corp_name']
                     pilot.alliance_name = info['alliance_name']
                 pilot.stats_link = self.stats_provider.get_link(pilot.char_id)
-                if pilot.char_id in stats_cache:
-                    stats = stats_cache[pilot.char_id]
-                    if stats and 'error' not in stats:
-                        pilot.stats = self.stats_provider.extract_display_stats(stats)
-                        pilot.state = PilotState.FOUND
+                self._apply_stats_from_cache(pilot, name, stats_cache)
             elif name in self.esi.name_cache:
                 char_id = self.esi.name_cache[name]
                 pilot = PilotData(name=name, char_id=char_id, state=PilotState.SEARCHING_STATS)
                 pilot.stats_link = self.stats_provider.get_link(char_id)
                 self._apply_esi_cache(pilot)
-                if char_id in stats_cache:
-                    stats = stats_cache[char_id]
-                    if stats and 'error' not in stats:
-                        pilot.stats = self.stats_provider.extract_display_stats(stats)
-                        pilot.state = PilotState.FOUND
+                self._apply_stats_from_cache(pilot, name, stats_cache)
             else:
                 pilot = PilotData(name=name, state=PilotState.SEARCHING_ESI)
             pilots[name] = pilot
@@ -348,12 +355,12 @@ class DScanAnalyzer:
             elif stats and stats.get('error') == 'not_found':
                 pilot.state = PilotState.NOT_FOUND
             elif stats and stats.get('error') == 'rate_limited':
-                pilot.state = PilotState.RATE_LIMITED
+                pilot.state = PilotState.CACHE_HIT if pilot.stats else PilotState.RATE_LIMITED
                 pilot.error_msg = f"Retry in {int(stats.get('retry_after', 0))}s"
             else:
-                pilot.state = PilotState.ERROR
+                pilot.state = PilotState.CACHE_HIT if pilot.stats else PilotState.ERROR
         except Exception as e:
-            pilot.state = PilotState.ERROR
+            pilot.state = PilotState.CACHE_HIT if pilot.stats else PilotState.ERROR
             pilot.error_msg = str(e)
 
     async def resolve_corp_alliance_async(self, pilot: PilotData, session: aiohttp.ClientSession):

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict
 from base_api_client import BaseAPIClient
 from tqdm import tqdm
-from zkill import StatsInterface
+from zkill import StatsInterface, calc_danger
 
 
 class EveKillClient(BaseAPIClient):
@@ -231,8 +231,5 @@ class EveKillStatsProvider(StatsInterface):
     def extract_display_stats(self, stats: Dict) -> Dict:
         if not stats or 'error' in stats:
             return {}
-        return {
-            'danger': stats.get('dangerRatio', 0),
-            'kills': stats.get('kills', 0),
-            'losses': stats.get('losses', 0)
-        }
+        kills, losses = stats.get('kills', 0), stats.get('losses', 0)
+        return {'danger': calc_danger(kills, losses), 'kills': kills, 'losses': losses}
