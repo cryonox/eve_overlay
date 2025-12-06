@@ -144,9 +144,9 @@ class DScanAnalyzer:
                     break
 
     def should_ignore_pilot(self, pilot: PilotData) -> bool:
-        if pilot.corp_name and any(ic.lower() in pilot.corp_name.lower() for ic in self.ignore_corps):
+        if pilot.corp_name and pilot.corp_name in self.ignore_corps:
             return True
-        if pilot.alliance_name and any(ia.lower() in pilot.alliance_name.lower() for ia in self.ignore_alliances):
+        if pilot.alliance_name and pilot.alliance_name in self.ignore_alliances:
             return True
         return False
 
@@ -401,9 +401,7 @@ class DScanAnalyzer:
         display_data.sort(key=lambda x: x.get('danger', -2), reverse=True)
 
         remaining = max(0, self.display_duration - (time.time() - self.result_start_time)) if self.result_start_time else self.display_duration
-        header = f"Pilots: {len(display_data)} | Timeout: {remaining:.0f}s"
-        if self.last_result_total_time:
-            header = f"Pilots: {len(display_data)} | Time: {self.last_result_total_time/1000:.2f}s | Timeout: {remaining:.0f}s"
+        header = f"{len(display_data)} | {remaining:.0f}s"
 
         text_lines = [header] + [e['text'] for e in display_data]
         full_text = '\n'.join(text_lines)
@@ -439,12 +437,12 @@ class DScanAnalyzer:
                 alliance_counts[pilot.alliance_name] = alliance_counts.get(pilot.alliance_name, 0) + 1
 
         remaining = max(0, self.display_duration - (time.time() - self.result_start_time)) if self.result_start_time else self.display_duration
-        header = f"Aggregated | Pilots: {len(self.pilots)} | Timeout: {remaining:.0f}s"
+        header = f"{len(self.pilots)} | {remaining:.0f}s"
 
-        left_lines = [header, "", "Alliances:"]
+        left_lines = [header, "Alliances:"]
         left_lines += [f"  {a}: {c}" for a, c in sorted(alliance_counts.items(), key=lambda x: x[1], reverse=True)] or ["  None"]
 
-        right_lines = ["", "", "Corporations:"]
+        right_lines = ["", "Corporations:"]
         right_lines += [f"  {c}: {n}" for c, n in sorted(corp_counts.items(), key=lambda x: x[1], reverse=True)]
 
         left_text, right_text = '\n'.join(left_lines), '\n'.join(right_lines)
@@ -453,12 +451,12 @@ class DScanAnalyzer:
         right_w, right_h = utils.get_text_size_withnewline(right_text, (20, 20),
             font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
 
-        total_w, total_h = left_w + right_w + 60, max(left_h, right_h) + 40
+        total_w, total_h = left_w + right_w + 30, max(left_h, right_h) + 40
         im = np.full((total_h, total_w, 3), C.dscan.transparency_color, np.uint8)
 
         utils.draw_text_on_image(im, left_text, (10, 20), color=(255, 255, 255),
             bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        utils.draw_text_on_image(im, right_text, (left_w + 40, 20), color=(255, 255, 255),
+        utils.draw_text_on_image(im, right_text, (left_w + 20, 20), color=(255, 255, 255),
             bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
 
         return im
@@ -487,14 +485,14 @@ class DScanAnalyzer:
         sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
 
         remaining = max(0, self.display_duration - (time.time() - self.result_start_time)) if self.result_start_time else self.display_duration
-        header = f"D-Scan | Ships: {total} | Timeout: {remaining:.0f}s"
+        header = f"{total} | {remaining:.0f}s"
 
-        left_lines = [header, ""]
+        left_lines = [header]
         for ship, cnt, diff in ship_list:
             diff_str = f" (+{diff})" if diff > 0 else f" ({diff})" if diff < 0 else ""
             left_lines.append(f"{ship}: {cnt}{diff_str}")
 
-        right_lines = ["Categories:", ""] + [f"{g}: {c}" for g, c in sorted_groups]
+        right_lines = ["Categories:"] + [f"{g}: {c}" for g, c in sorted_groups]
 
         left_text, right_text = '\n'.join(left_lines), '\n'.join(right_lines)
         left_w, left_h = utils.get_text_size_withnewline(left_text, (20, 20),
@@ -502,22 +500,22 @@ class DScanAnalyzer:
         right_w, right_h = utils.get_text_size_withnewline(right_text, (20, 20),
             font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
 
-        total_w, total_h = left_w + right_w + 60, max(left_h, right_h) + 40
+        total_w, total_h = left_w + right_w + 30, max(left_h, right_h) + 40
         im = np.full((total_h, total_w, 3), C.dscan.transparency_color, np.uint8)
 
         y = 20
         for i, line in enumerate(left_lines):
-            if i < 2:
+            if i < 1:
                 color = (255, 255, 255)
-            elif i - 2 < len(ship_list):
-                _, _, diff = ship_list[i - 2]
+            elif i - 1 < len(ship_list):
+                _, _, diff = ship_list[i - 1]
                 color = (0, 255, 0) if diff > 0 else (0, 0, 255) if diff < 0 else (255, 255, 255)
             else:
                 color = (255, 255, 255)
             y = utils.draw_text_on_image(im, line, (10, y), color=color,
                 bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
 
-        utils.draw_text_on_image(im, right_text, (left_w + 40, 20), color=(255, 255, 255),
+        utils.draw_text_on_image(im, right_text, (left_w + 20, 20), color=(255, 255, 255),
             bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
 
         return im

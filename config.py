@@ -2,6 +2,7 @@ import yaml
 from pathlib import Path
 import sys
 from rich import print
+from loguru import logger
 
 
 class AttrDict(dict):
@@ -133,3 +134,4 @@ if C is None:
     rules['$pwd'] = str(cur_path)
     C = substitute(C, rules)
     configure_logger(C)
+logger.info(C)
