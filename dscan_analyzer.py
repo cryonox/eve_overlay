@@ -44,7 +44,6 @@ class PilotData:
     stats_link: Optional[str] = None
     error_msg: Optional[str] = None
     corp_alliance_resolved: bool = False
-    corp_alliance_from_cache: bool = False
 
 
 class DScanAnalyzer:
@@ -233,6 +232,17 @@ class DScanAnalyzer:
             pilot.state = PilotState.ERROR
             pilot.error_msg = str(e)
 
+    def _apply_esi_cache(self, pilot: PilotData) -> bool:
+        if pilot.char_id not in self.esi.char_cache:
+            return False
+        char_info = self.esi.char_cache[pilot.char_id]
+        pilot.corp_id = char_info.get('corporation_id')
+        pilot.alliance_id = char_info.get('alliance_id')
+        pilot.corp_name = self.esi.id_name_cache.get(pilot.corp_id, 'Unknown') if pilot.corp_id else None
+        pilot.alliance_name = self.esi.id_name_cache.get(pilot.alliance_id) if pilot.alliance_id else None
+        pilot.corp_alliance_resolved = True
+        return True
+
     def process_cache_lookup(self, names: List[str]) -> Dict[str, PilotData]:
         pilots = {}
         stats_cache = self.stats_provider.client.cache
@@ -243,12 +253,12 @@ class DScanAnalyzer:
                     name=name,
                     state=PilotState.CACHE_HIT,
                     char_id=info['char_id'],
-                    corp_id=info['corp_id'],
-                    alliance_id=info['alliance_id'],
-                    corp_name=info['corp_name'],
-                    alliance_name=info['alliance_name'],
-                    corp_alliance_from_cache=True
                 )
+                if not self._apply_esi_cache(pilot):
+                    pilot.corp_id = info['corp_id']
+                    pilot.alliance_id = info['alliance_id']
+                    pilot.corp_name = info['corp_name']
+                    pilot.alliance_name = info['alliance_name']
                 pilot.stats_link = self.stats_provider.get_link(pilot.char_id)
                 if pilot.char_id in stats_cache:
                     stats = stats_cache[pilot.char_id]
@@ -259,13 +269,7 @@ class DScanAnalyzer:
                 char_id = self.esi.name_cache[name]
                 pilot = PilotData(name=name, char_id=char_id, state=PilotState.SEARCHING_STATS)
                 pilot.stats_link = self.stats_provider.get_link(char_id)
-                if char_id in self.esi.char_cache:
-                    char_info = self.esi.char_cache[char_id]
-                    pilot.corp_id = char_info.get('corporation_id')
-                    pilot.alliance_id = char_info.get('alliance_id')
-                    pilot.corp_name = self.esi.id_name_cache.get(pilot.corp_id, 'Unknown') if pilot.corp_id else None
-                    pilot.alliance_name = self.esi.id_name_cache.get(pilot.alliance_id) if pilot.alliance_id else None
-                    pilot.corp_alliance_resolved = True
+                self._apply_esi_cache(pilot)
                 if char_id in stats_cache:
                     stats = stats_cache[char_id]
                     if stats and 'error' not in stats:
@@ -292,7 +296,7 @@ class DScanAnalyzer:
         pilots_needing_esi = [p for p in self.pilots.values() if p.state == PilotState.SEARCHING_ESI]
         pilots_needing_stats = [p for p in self.pilots.values() if p.state in [PilotState.CACHE_HIT, PilotState.SEARCHING_STATS]]
         pilots_needing_corp_resolve = [p for p in self.pilots.values()
-                                       if p.corp_alliance_from_cache and not p.corp_alliance_resolved]
+                                       if p.corp_id and not p.corp_alliance_resolved]
 
         skip_stats = len(char_names) > self.stats_limit
         if skip_stats:
