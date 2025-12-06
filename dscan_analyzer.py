@@ -60,6 +60,8 @@ class DScanAnalyzer:
         self.char_rects = {}
         self.result_start_time = None
         self.last_result_total_time = None
+        self.paused_time = 0
+        self.pause_start_time = None
 
         self.cache = CacheManager()
         self.cache.load_cache()
@@ -98,9 +100,24 @@ class DScanAnalyzer:
         start_checking_hotkeys()
         self.show_status("")
 
+    def get_elapsed_time(self):
+        if not self.result_start_time:
+            return 0
+        elapsed = time.time() - self.result_start_time - self.paused_time
+        if self.pause_start_time:
+            elapsed -= time.time() - self.pause_start_time
+        return elapsed
+
     def toggle_transparency(self):
         self.transparency_on = not self.transparency_on
         self.should_destroy_window = True
+        if self.transparency_on:
+            if self.pause_start_time:
+                self.paused_time += time.time() - self.pause_start_time
+                self.pause_start_time = None
+        else:
+            if self.result_start_time and not self.pause_start_time:
+                self.pause_start_time = time.time()
 
     def toggle_mode(self):
         self.aggregated_mode = not self.aggregated_mode
@@ -139,7 +156,7 @@ class DScanAnalyzer:
         if event == cv2.EVENT_LBUTTONDOWN:
             for char_name, (rect, link) in self.char_rects.items():
                 rx, ry, rw, rh = rect
-                if rx <= x <= rx + rw and ry - rh <= y <= ry and link:
+                if rx <= x <= rx + rw and ry <= y <= ry + rh and link:
                     webbrowser.open(link)
                     break
 
@@ -246,6 +263,8 @@ class DScanAnalyzer:
 
         self.pilots = self.process_cache_lookup(char_names)
         self.result_start_time = time.time()
+        self.paused_time = 0
+        self.pause_start_time = None
 
         pilots_needing_esi = [p for p in self.pilots.values() if p.state == PilotState.SEARCHING_ESI]
         pilots_needing_stats = [p for p in self.pilots.values() if p.state in [PilotState.CACHE_HIT, PilotState.SEARCHING_STATS]]
@@ -335,6 +354,8 @@ class DScanAnalyzer:
                 self.previous_ship_counts = self.last_ship_counts
 
             self.result_start_time = time.time()
+            self.paused_time = 0
+            self.pause_start_time = None
             self.last_dscan_time = cur_time
             self.last_ship_counts = ship_counts
         except Exception as e:
@@ -400,7 +421,7 @@ class DScanAnalyzer:
 
         display_data.sort(key=lambda x: x.get('danger', -2), reverse=True)
 
-        remaining = max(0, self.display_duration - (time.time() - self.result_start_time)) if self.result_start_time else self.display_duration
+        remaining = max(0, self.display_duration - self.get_elapsed_time())
         header = f"{len(display_data)} | {remaining:.0f}s"
 
         text_lines = [header] + [e['text'] for e in display_data]
@@ -417,9 +438,10 @@ class DScanAnalyzer:
         for entry in display_data:
             text_size, _ = cv2.getTextSize(entry['text'], cv2.FONT_HERSHEY_SIMPLEX,
                 C.dscan.font_scale, int(C.dscan.font_thickness))
-            self.char_rects[entry['name']] = ((10, y, text_size[0], text_size[1]), entry['link'])
+            start_y = y
             y = utils.draw_text_on_image(im, entry['text'], (10, y), color=entry['color'],
                 bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
+            self.char_rects[entry['name']] = ((10, start_y, text_size[0], y - start_y), entry['link'])
 
         return im
 
@@ -436,7 +458,7 @@ class DScanAnalyzer:
             if pilot.alliance_name:
                 alliance_counts[pilot.alliance_name] = alliance_counts.get(pilot.alliance_name, 0) + 1
 
-        remaining = max(0, self.display_duration - (time.time() - self.result_start_time)) if self.result_start_time else self.display_duration
+        remaining = max(0, self.display_duration - self.get_elapsed_time())
         header = f"{len(self.pilots)} | {remaining:.0f}s"
 
         left_lines = [header, "Alliances:"]
@@ -484,7 +506,7 @@ class DScanAnalyzer:
         ship_list.sort(key=lambda x: (x[1] == 0, -x[1]))
         sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
 
-        remaining = max(0, self.display_duration - (time.time() - self.result_start_time)) if self.result_start_time else self.display_duration
+        remaining = max(0, self.display_duration - self.get_elapsed_time())
         header = f"{total} | {remaining:.0f}s"
 
         left_lines = [header]
@@ -541,12 +563,13 @@ class DScanAnalyzer:
                     self.last_result_total_time = utils.tock()
                     last_clipboard = cur_clipboard
 
-                if self.result_start_time and time.time() - self.result_start_time >= self.display_duration:
-                    self.show_status("")
-                    self.result_start_time = None
-                    self.last_result_im = None
-                    self.pilots = {}
-                    self.last_ship_counts = None
+                if self.result_start_time and self.transparency_on:
+                    if self.get_elapsed_time() >= self.display_duration:
+                        self.show_status("")
+                        self.result_start_time = None
+                        self.last_result_im = None
+                        self.pilots = {}
+                        self.last_ship_counts = None
 
                 im = None
                 if self.is_local:
