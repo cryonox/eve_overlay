@@ -24,6 +24,7 @@ import win32api
 from evekill import EveKillStatsProvider
 from cache_stats import CacheStatsProvider
 from esi import ESIResolver
+from pilot_color_classifier import PilotColorClassifier
 
 PILOT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9' -]*[A-Za-z0-9]$")
 
@@ -125,6 +126,9 @@ class DScanAnalyzer:
         rate_limit_delay = C.dscan.get('rate_limit_retry_delay', 5)
         providers = {'zkill': lambda: ZKillStatsProvider(rate_limit_delay), 'evekill': lambda: EveKillStatsProvider(rate_limit_delay), 'cache': CacheStatsProvider}
         self.stats_provider = providers.get(stats_provider, providers['zkill'])()
+
+        pilot_colors_cfg = C.dscan.get('pilot_colors', {})
+        self.pilot_classifier = PilotColorClassifier(pilot_colors_cfg) if pilot_colors_cfg else PilotColorClassifier.create_default()
 
         self.pilots: Dict[str, PilotData] = {}
         self.pending_tasks: Dict[str, asyncio.Task] = {}
@@ -607,20 +611,20 @@ class DScanAnalyzer:
                 if pilot.stats:
                     d, k, l = pilot.stats.get('danger', 0), pilot.stats.get('kills', 0), pilot.stats.get('losses', 0)
                     entry['text'] = f"{entry['name']} | D:{d:.0f} K:{k} L:{l}"
-                    entry['color'] = (0, 0, 255) if d >= 80 else (0, 255, 255) if d > 0 else (255, 255, 255)
-                    entry['danger'] = d
+                    entry['color'] = self.pilot_classifier.get_color(pilot.stats)
+                    entry['kills'] = k
                 else:
                     entry['text'] = f"{entry['name']} | [Cached]"
                     entry['color'] = (200, 200, 200)
-                    entry['danger'] = -1
+                    entry['kills'] = -1
             else:
                 entry['text'] = f"{entry['name']} | Unknown"
                 entry['color'] = (128, 128, 128)
-                entry['danger'] = -2
+                entry['kills'] = -2
 
             display_data.append(entry)
 
-        display_data.sort(key=lambda x: x.get('danger', -2), reverse=True)
+        display_data.sort(key=lambda x: x.get('kills', -2), reverse=True)
 
         remaining = max(0, self.display_duration - self.get_elapsed_time())
         header = f"{len(display_data)} | {remaining:.0f}s"

@@ -27,4 +27,14 @@ dscan:
     red:
       entities: [Fraternity.]
       color: [0, 0, 255]
-      
+  pilot_colors:
+    default_color: [255, 255, 255]
+    rules:
+      dangerous:
+        color: [0, 0, 255]
+        kills_min: 100
+        danger_min: 70
+      cautious:
+        color: [0, 255, 255]
+        kills_min: 10
+        danger_min: 20
