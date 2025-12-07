@@ -1,6 +1,7 @@
 import pyperclip
 import time
 import copy
+import re
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import Optional, Dict, List
@@ -21,7 +22,30 @@ from zkill import ZKillStatsProvider, calc_danger
 import win32gui
 import win32api
 from evekill import EveKillStatsProvider
+from cache_stats import CacheStatsProvider
 from esi import ESIResolver
+
+PILOT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9' -]*[A-Za-z0-9]$")
+
+
+def get_invalid_pilot_name_reason(name: str) -> Optional[str]:
+    if not name:
+        return "empty name"
+    if len(name) < 3:
+        return f"too short ({len(name)} < 3)"
+    if len(name) > 37:
+        return f"too long ({len(name)} > 37)"
+    if not PILOT_NAME_PATTERN.match(name):
+        if name[0] in " '-":
+            return f"starts with invalid char '{name[0]}'"
+        if name[-1] in " '-":
+            return f"ends with invalid char '{name[-1]}'"
+        return "contains invalid characters"
+    return None
+
+
+def is_valid_pilot_name(name: str) -> bool:
+    return get_invalid_pilot_name_reason(name) is None
 
 
 def get_dscan_info_url(paste_data: str) -> Optional[str]:
@@ -66,7 +90,7 @@ class PilotData:
 
 class DScanAnalyzer:
     def __init__(self):
-        self.ignore = C.dscan.get('ignore', [])
+        self.ignore = set(C.dscan.get('ignore', []))
         self.display_duration = C.dscan.get('timeout', 10)
         self.stats_limit = C.dscan.get('aggregated_mode_threshold', 50)
         self.win_name = "D-Scan Analysis"
@@ -99,7 +123,8 @@ class DScanAnalyzer:
 
         stats_provider = C.dscan.get('stats_provider', 'zkill')
         rate_limit_delay = C.dscan.get('rate_limit_retry_delay', 5)
-        self.stats_provider = ZKillStatsProvider(rate_limit_delay) if stats_provider == 'zkill' else EveKillStatsProvider(rate_limit_delay)
+        providers = {'zkill': lambda: ZKillStatsProvider(rate_limit_delay), 'evekill': lambda: EveKillStatsProvider(rate_limit_delay), 'cache': CacheStatsProvider}
+        self.stats_provider = providers.get(stats_provider, providers['zkill'])()
 
         self.pilots: Dict[str, PilotData] = {}
         self.pending_tasks: Dict[str, asyncio.Task] = {}
@@ -254,19 +279,19 @@ class DScanAnalyzer:
             cv2.rectangle(im, (rx - 2, ry - 2), (rx + rw + 2, ry + rh + 2), self.hover_color, 2)
         return im
 
+    def match_pilot_entity(self, pilot: PilotData, entities: set) -> Optional[str]:
+        for attr in ('name', 'corp_name', 'alliance_name'):
+            val = getattr(pilot, attr, None)
+            if val and val in entities:
+                return val
+        return None
+
     def should_ignore_pilot(self, pilot: PilotData) -> bool:
-        if pilot.corp_name and pilot.corp_name in self.ignore:
-            return True
-        if pilot.alliance_name and pilot.alliance_name in self.ignore:
-            return True
-        return False
+        return self.match_pilot_entity(pilot, self.ignore) is not None
 
     def get_pilot_group(self, pilot: PilotData) -> Optional[Dict]:
-        if pilot.alliance_name and pilot.alliance_name in self.entity_to_group:
-            return self.entity_to_group[pilot.alliance_name]
-        if pilot.corp_name and pilot.corp_name in self.entity_to_group:
-            return self.entity_to_group[pilot.corp_name]
-        return None
+        matched = self.match_pilot_entity(pilot, set(self.entity_to_group.keys()))
+        return self.entity_to_group.get(matched) if matched else None
 
     async def lookup_pilot_async(self, pilot: PilotData, session: aiohttp.ClientSession, skip_stats: bool = False):
         try:
@@ -507,15 +532,44 @@ class DScanAnalyzer:
         except Exception as e:
             logger.info(f"Error parsing dscan: {e}")
 
-    def parse_clipboard(self, clipboard_data: str):
-        lines = clipboard_data.strip().split('\n')
-        is_dscan = any('\t' in line for line in lines[:5])
-        self.is_dscan = is_dscan
-        self.is_local = not is_dscan
+    def is_dscan_format(self, data: str) -> bool:
+        lines = data.strip().split('\n')
+        return bool(lines) and any('\t' in line for line in lines[:5])
 
-        if is_dscan:
-            asyncio.run(self.parse_dscan(clipboard_data))
-        else:
+    def is_valid_dscan(self, data: str) -> bool:
+        lines = data.strip().split('\n')
+        if not lines:
+            logger.debug("Invalid dscan: empty data")
+            return False
+        for i, line in enumerate(lines):
+            if line and line[0] in ' \t':
+                logger.debug(f"Invalid dscan: line {i+1} starts with whitespace: '{line[:30]}...'")
+                return False
+        return True
+
+    def is_valid_pilot_list(self, data: str) -> bool:
+        lines = [line.strip() for line in data.strip().split('\n') if line.strip()]
+        if not lines:
+            logger.debug("Invalid pilot list: empty data")
+            return False
+        for line in lines:
+            reason = get_invalid_pilot_name_reason(line)
+            if reason:
+                logger.debug(f"Invalid pilot list: '{line[:30]}' - {reason}")
+                return False
+        return True
+
+    def parse_clipboard(self, clipboard_data: str):
+        if self.is_dscan_format(clipboard_data):
+            if self.is_valid_dscan(clipboard_data):
+                self.is_dscan = True
+                self.is_local = False
+                asyncio.run(self.parse_dscan(clipboard_data))
+            return
+
+        if self.is_valid_pilot_list(clipboard_data):
+            self.is_dscan = False
+            self.is_local = True
             self.process_local(clipboard_data)
 
     def create_pilot_display(self) -> Optional[np.ndarray]:
@@ -800,7 +854,6 @@ class DScanAnalyzer:
             while True:
                 cur_clipboard = self.get_clipboard_data()
                 if cur_clipboard and cur_clipboard != last_clipboard:
-                    self.show_status("Working...")
                     utils.tick()
                     self.parse_clipboard(cur_clipboard)
                     self.last_result_total_time = utils.tock()
@@ -814,12 +867,15 @@ class DScanAnalyzer:
                         self.last_result_im = None
                         self.pilots = {}
                         self.last_ship_counts = None
+                        self.is_local = False
+                        self.is_dscan = False
 
                 im = None
-                if self.is_local:
-                    im = self.create_aggregated_display() if self.aggregated_mode else self.create_pilot_display()
-                elif self.is_dscan:
-                    im = self.create_dscan_display()
+                if self.result_start_time:
+                    if self.is_local:
+                        im = self.create_aggregated_display() if self.aggregated_mode else self.create_pilot_display()
+                    elif self.is_dscan:
+                        im = self.create_dscan_display()
 
                 if im is not None:
                     disp_im = self.apply_hover_highlight(im)

@@ -1,7 +1,7 @@
 cache: cache
 logging:
   enabled: true
-  level: INFO
+  level: DEBUG
 dscan:
   bg_color: [25, 25, 25]
   enabled: true
