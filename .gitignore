@@ -2,7 +2,7 @@ dist
 build
 .pixi
 *.pyc
-config.private.yaml
+config.*.yaml
 test_data/
 .augment-guidelines
 cache/char_info.pkl

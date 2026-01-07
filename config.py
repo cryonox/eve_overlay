@@ -15,6 +15,50 @@ class AttrDict(dict):
     def __setattr__(self, name, value):
         self[name] = value
 
+    def _get_nested(self, key_path):
+        obj = self
+        for p in key_path.split('.'):
+            if obj is None:
+                return None
+            obj = obj.get(p) if isinstance(obj, dict) else None
+        return obj
+
+    def _to_dict(self, obj=None):
+        obj = obj if obj is not None else self
+        if isinstance(obj, AttrDict):
+            return {k: self._to_dict(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._to_dict(v) for v in obj]
+        return obj
+
+    def write(self, keys, filepath):
+        from functools import reduce
+        base_path = get_base_path()
+        fpath = base_path / filepath
+        
+        existing = {}
+        if fpath.exists():
+            with open(fpath, 'r') as f:
+                existing = yaml.safe_load(f) or {}
+        
+        def set_nested(obj, key_path, val):
+            parts = key_path.split('.')
+            for p in parts[:-1]:
+                obj = obj.setdefault(p, {})
+            obj[parts[-1]] = val
+        
+        for key in keys:
+            val = self._get_nested(key)
+            if val is not None:
+                set_nested(existing, key, self._to_dict(val))
+        
+        def represent_list(dumper, data):
+            return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
+        
+        yaml.add_representer(list, represent_list)
+        with open(fpath, 'w') as f:
+            yaml.dump(existing, f, default_flow_style=False, indent=2)
+
 
 def dict2attrdict(dictionary):
     ret = AttrDict()
@@ -68,26 +112,14 @@ def create_default_config(fpath):
     print(f"Created default config at {fpath}")
 
 
-def load_config(fpath=None):
-    if fpath is None:
-        if getattr(sys, 'frozen', False):
-            # Running as PyInstaller executable
-            base_path = Path(sys.executable).parent
-        else:
-            # Running as script
-            base_path = Path(__file__).resolve().parent
-        fpath = base_path / 'config.yaml'
-    else:
-        fpath = Path(fpath)
-
+def load_config(fpath):
+    fpath = Path(fpath)
     if not fpath.exists():
-        create_default_config(fpath)
-
+        return None
     with open(fpath, "r") as stream:
         try:
-            c = dict2attrdict(yaml.safe_load(stream))
-            return c
-        except Exception as ex:
+            return dict2attrdict(yaml.safe_load(stream))
+        except Exception:
             return None
 
 
@@ -118,21 +150,84 @@ def configure_logger(cfg):
     logger.add(sys.stderr, level=level)
 
 
-C = None
-if C is None:
-    C = load_config()
-    if C is None:
-        print('config.yaml is empty.')
-        create_default_config('config.yaml')
-        C = load_config()
-    if Path('config.private.yaml').exists():
-        Cp = load_config('config.private.yaml')
-        if Cp is not None:
-            C = merge_dict(C, Cp)
+def attrdict2dict(obj):
+    if isinstance(obj, AttrDict):
+        return {k: attrdict2dict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [attrdict2dict(v) for v in obj]
+    return obj
 
-    rules = {}
-    cur_path = Path(__file__).resolve().parent
-    rules['$pwd'] = str(cur_path)
-    C = substitute(C, rules)
-    configure_logger(C)
+
+def get_nested(obj, key_path):
+    parts = key_path.split('.')
+    for p in parts:
+        if obj is None:
+            return None
+        obj = obj.get(p) if isinstance(obj, dict) else None
+    return obj
+
+
+def set_nested(obj, key_path, val):
+    parts = key_path.split('.')
+    for p in parts[:-1]:
+        obj = obj.setdefault(p, {})
+    obj[parts[-1]] = val
+
+
+def write(keys, filepath):
+    global C
+    base_path = get_base_path()
+    fpath = base_path / filepath
+    
+    existing = {}
+    if fpath.exists():
+        with open(fpath, 'r') as f:
+            existing = yaml.safe_load(f) or {}
+    
+    for key in keys:
+        val = get_nested(C, key)
+        if val is not None:
+            set_nested(existing, key, attrdict2dict(val))
+    
+    def represent_list(dumper, data):
+        return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
+    
+    yaml.add_representer(list, represent_list)
+    with open(fpath, 'w') as f:
+        yaml.dump(existing, f, default_flow_style=False, indent=2)
+
+
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
+
+def load_all_configs():
+    base_path = get_base_path()
+    main_cfg_path = base_path / 'config.yaml'
+    
+    if not main_cfg_path.exists():
+        create_default_config(main_cfg_path)
+    
+    cfg = load_config(main_cfg_path)
+    if cfg is None:
+        print('config.yaml is empty.')
+        create_default_config(main_cfg_path)
+        cfg = load_config(main_cfg_path)
+    
+    extra_files = sorted(base_path.glob('config.*.yaml'))
+    for fpath in extra_files:
+        extra_cfg = load_config(fpath)
+        if extra_cfg is not None:
+            cfg = merge_dict(cfg, extra_cfg)
+            logger.info(f"Merged config from {fpath.name}")
+    
+    rules = {'$pwd': str(base_path)}
+    cfg = substitute(cfg, rules)
+    configure_logger(cfg)
+    return cfg
+
+
+C = load_all_configs()
 logger.info(C)
