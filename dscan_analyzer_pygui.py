@@ -678,11 +678,25 @@ class DScanAnalyzer:
         self.last_clip = clip
         
         if self.dscan_svc.is_dscan_format(clip) and self.dscan_svc.is_valid_dscan(clip) and self.dscan_svc.parse(clip, self.diff_timeout):
-            self.mode = 'dscan'
-            self.reset_timeout()
+            self.set_mode('dscan')
         elif self.pilot_svc.set_pilots(clip):
-            self.mode = 'pilots'
-            self.reset_timeout()
+            self.set_mode('pilots')
+    
+    def set_mode(self, new_mode):
+        if self.mode != new_mode:
+            self.clear_display()
+        self.mode = new_mode
+        self.reset_timeout()
+    
+    def clear_display(self):
+        if dpg.does_item_exist("pilot_list"):
+            dpg.delete_item("pilot_list")
+        if dpg.does_item_exist("aggr_content"):
+            dpg.delete_item("aggr_content")
+        if dpg.does_item_exist("dscan_content"):
+            dpg.delete_item("dscan_content")
+        self.rendered_cnt = 0
+        self.dscan_rendered_cnt = 0
     
     def reset_timeout(self):
         self.result_start_time = time.time()
