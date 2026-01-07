@@ -1,12 +1,12 @@
 import dearpygui.dearpygui as dpg
-from overlay import OverlayWindow, WindowPosManager
+from overlay import OverlayWindow, WindowManager
 from config import C
 import random
 import time
 import math
 
 WIN_TITLE = "overlay"
-pos_mgr = WindowPosManager(WIN_TITLE, C)
+win_mgr = WindowManager(WIN_TITLE, C)
 
 def on_overlay_toggle(enabled):
     if enabled:
@@ -20,12 +20,12 @@ overlay = OverlayWindow(WIN_TITLE, on_toggle=on_overlay_toggle)
 dpg.create_context()
 
 with dpg.font_registry():
-    default_font = dpg.add_font("C:/Windows/Fonts/arial.ttf", int(16 * pos_mgr.dpi_scale))
+    default_font = dpg.add_font("C:/Windows/Fonts/arial.ttf", int(16 * win_mgr.dpi_scale))
 dpg.bind_font(default_font)
 
-win_x, win_y = pos_mgr.load_pos()
-print(f"Loading window position: {win_x}, {win_y}")
-dpg.create_viewport(title=WIN_TITLE, width=800, height=600, always_on_top=True, clear_color=overlay.colorkey_rgba, x_pos=win_x, y_pos=win_y)
+win_x, win_y, win_w, win_h = win_mgr.load()
+print(f"Loading window state: {win_x}, {win_y}, {win_w}, {win_h}")
+dpg.create_viewport(title=WIN_TITLE, width=win_w, height=win_h, always_on_top=True, clear_color=overlay.colorkey_rgba, x_pos=win_x, y_pos=win_y)
 dpg.set_viewport_resize_callback(lambda: None)
 dpg.setup_dearpygui()
 
@@ -143,9 +143,9 @@ dpg.set_primary_window("main", True)
 dpg.show_viewport()
 
 dpg.render_dearpygui_frame()
-pos_mgr.apply_pos()
+win_mgr.apply()
 
-print(f"Initial position: {pos_mgr.get_pos()}")
+print(f"Initial state: {win_mgr.get_state()}")
 while dpg.is_dearpygui_running():
     t = (math.sin(time.time() * 2) + 1) / 2
     r, b = int(255 * (1 - t)), int(255 * t)
@@ -153,7 +153,7 @@ while dpg.is_dearpygui_running():
     update_dynamic_text()
     update_graph()
     overlay.process_hotkey()
-    pos_mgr.check_and_save()
+    win_mgr.check_and_save()
     dpg.render_dearpygui_frame()
 
 overlay.cleanup()

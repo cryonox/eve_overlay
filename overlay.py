@@ -14,13 +14,13 @@ class RECT(ctypes.Structure):
                 ("bottom", wintypes.LONG)]
 
 
-class WindowPosManager:
+class WindowManager:
     def __init__(self, title, cfg, state_file='config.state.yaml', cfg_key='winstate'):
         self._title = title
         self._cfg = cfg
         self._state_file = state_file
         self._cfg_key = cfg_key
-        self._last_pos = None
+        self._last_state = None
         self._dpi_scale = self._get_dpi_scale()
     
     @property
@@ -37,40 +37,66 @@ class WindowPosManager:
     def _get_hwnd(self):
         return win32gui.FindWindow(None, self._title)
     
-    def get_pos(self):
+    def get_state(self):
         hwnd = self._get_hwnd()
         if hwnd:
             rect = win32gui.GetWindowRect(hwnd)
-            return rect[0], rect[1]
+            return rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]
         return None
     
-    def load_pos(self, default_x=100, default_y=100):
+    def get_pos(self):
+        state = self.get_state()
+        return (state[0], state[1]) if state else None
+    
+    def load(self, default_x=100, default_y=100, default_w=400, default_h=300):
         from config import dict2attrdict
         state = self._cfg.get(self._cfg_key, {})
         x = int(state.get('x', default_x))
         y = int(state.get('y', default_y))
-        self._last_pos = (x, y)
+        w = int(state.get('w', default_w))
+        h = int(state.get('h', default_h))
+        self._last_state = (x, y, w, h)
+        return x, y, w, h
+    
+    def load_pos(self, default_x=100, default_y=100):
+        x, y, _, _ = self.load(default_x, default_y)
         return x, y
     
-    def save_pos(self):
+    def save(self):
         from config import dict2attrdict
-        pos = self.get_pos()
-        if pos:
-            setattr(self._cfg, self._cfg_key, dict2attrdict({'x': pos[0], 'y': pos[1]}))
+        state = self.get_state()
+        if state:
+            setattr(self._cfg, self._cfg_key, dict2attrdict({'x': state[0], 'y': state[1], 'w': state[2], 'h': state[3]}))
             self._cfg.write([self._cfg_key], self._state_file)
+    
+    def apply(self, x=None, y=None, w=None, h=None):
+        hwnd = self._get_hwnd()
+        if hwnd:
+            if self._last_state is None:
+                self.load()
+            if x is None:
+                x = self._last_state[0]
+            if y is None:
+                y = self._last_state[1]
+            if w is None:
+                w = self._last_state[2]
+            if h is None:
+                h = self._last_state[3]
+            win32gui.SetWindowPos(hwnd, 0, x, y, w, h, 0x0004)
     
     def apply_pos(self, x=None, y=None):
         hwnd = self._get_hwnd()
         if hwnd:
             if x is None or y is None:
-                x, y = self._last_pos or self.load_pos()
+                px, py = self._last_state[:2] if self._last_state else self.load_pos()
+                x, y = x or px, y or py
             win32gui.SetWindowPos(hwnd, 0, x, y, 0, 0, 0x0001 | 0x0004)
     
     def check_and_save(self):
-        cur_pos = self.get_pos()
-        if cur_pos and cur_pos != self._last_pos:
-            self._last_pos = cur_pos
-            self.save_pos()
+        cur_state = self.get_state()
+        if cur_state and cur_state != self._last_state:
+            self._last_state = cur_state
+            self.save()
             return True
         return False
 

@@ -3,6 +3,7 @@ logging:
   enabled: true
   level: DEBUG
 dscan:
+  font: C:/Windows/Fonts/arial.ttf
   bg_color: [25, 25, 25]
   enabled: true
   font_scale: 0.5

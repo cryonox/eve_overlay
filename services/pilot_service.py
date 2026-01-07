@@ -1,7 +1,7 @@
 import asyncio
 import threading
 import aiohttp
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional
 from loguru import logger
 
 from .models import PilotData, PilotState, get_invalid_pilot_name_reason
@@ -14,10 +14,11 @@ from cache_stats import CacheStatsProvider
 
 class PilotService:
     def __init__(self, cache_dir: str = 'cache', stats_provider: str = 'zkill',
-                 rate_limit_delay: int = 5):
+                 rate_limit_delay: int = 5, stats_limit: int = 50):
         self.cache = CacheManager(cache_dir)
         self.cache.load_cache()
         self.esi = ESIResolver()
+        self.stats_limit = stats_limit
 
         providers = {
             'zkill': lambda: ZKillStatsProvider(rate_limit_delay),
@@ -27,18 +28,30 @@ class PilotService:
         self.stats_provider = providers.get(
             stats_provider, providers['zkill'])()
 
+        self._pilots: Dict[str, PilotData] = {}
         self._network_thread: Optional[threading.Thread] = None
-        self._on_update: Optional[Callable[[], None]] = None
-
-    def set_update_callback(self, cb: Callable[[], None]):
-        self._on_update = cb
 
     def clear_caches(self):
         self.stats_provider.client.clear_cache()
         self.esi = ESIResolver()
         logger.info("Caches cleared")
 
-    def parse_pilot_list(self, clipboard_data: str) -> Optional[List[str]]:
+    def set_pilots(self, clipboard_data: str) -> bool:
+        names = self._parse_pilot_list(clipboard_data)
+        if not names:
+            return False
+        self._pilots = self._lookup_from_cache(names)
+        skip_stats = len(names) > self.stats_limit
+        self._fetch_missing_data(skip_stats)
+        return True
+
+    def get_pilots(self) -> Dict[str, PilotData]:
+        return self._pilots
+
+    def reset(self):
+        self._pilots = {}
+
+    def _parse_pilot_list(self, clipboard_data: str) -> Optional[List[str]]:
         lines = [line.strip()
                  for line in clipboard_data.strip().split('\n') if line.strip()]
         if not lines:
@@ -50,7 +63,7 @@ class PilotService:
                 return None
         return lines
 
-    def lookup_from_cache(self, names: List[str]) -> Dict[str, PilotData]:
+    def _lookup_from_cache(self, names: List[str]) -> Dict[str, PilotData]:
         pilots = {}
         stats_cache = self.stats_provider.client.cache
 
@@ -107,13 +120,12 @@ class PilotService:
             return True
         return False
 
-    def fetch_missing_data(self, pilots: Dict[str, PilotData], skip_stats: bool = False):
-        pilots_esi = [p for p in pilots.values() if p.state ==
-                      PilotState.SEARCHING_ESI]
-        pilots_stats = [p for p in pilots.values()
+    def _fetch_missing_data(self, skip_stats: bool = False):
+        pilots_esi = [p for p in self._pilots.values() if p.state == PilotState.SEARCHING_ESI]
+        pilots_stats = [p for p in self._pilots.values()
                         if p.state in [PilotState.CACHE_HIT, PilotState.SEARCHING_STATS]]
-        pilots_corp = [p for p in pilots.values(
-        ) if p.corp_id and not p.corp_alliance_resolved]
+        pilots_corp = [p for p in self._pilots.values()
+                       if p.corp_id and not p.corp_alliance_resolved]
 
         if skip_stats:
             for p in pilots_stats:
@@ -128,8 +140,6 @@ class PilotService:
         def run_fetch():
             asyncio.run(self._fetch_network_data(
                 pilots_esi, pilots_stats, skip_stats, pilots_corp or []))
-            if self._on_update:
-                self._on_update()
 
         self._network_thread = threading.Thread(target=run_fetch, daemon=True)
         self._network_thread.start()
@@ -139,8 +149,7 @@ class PilotService:
         connector = aiohttp.TCPConnector(limit=50)
         async with aiohttp.ClientSession(connector=connector) as session:
             if pilots_esi:
-                tasks = [self._lookup_pilot_async(
-                    p, session, skip_stats) for p in pilots_esi]
+                tasks = [self._lookup_pilot_async(p, session, skip_stats) for p in pilots_esi]
                 await asyncio.gather(*tasks, return_exceptions=True)
 
             if pilots_corp:
@@ -152,8 +161,7 @@ class PilotService:
             if not skip_stats and pilots_stats:
                 for p in pilots_stats:
                     p.state = PilotState.SEARCHING_STATS
-                tasks = [self._fetch_stats_async(
-                    p, session) for p in pilots_stats]
+                tasks = [self._fetch_stats_async(p, session) for p in pilots_stats]
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _lookup_pilot_async(self, pilot: PilotData, session: aiohttp.ClientSession,
@@ -175,8 +183,7 @@ class PilotService:
                 if ids:
                     names = await self.esi.resolve_ids_to_names(session, ids)
                     pilot.corp_name = names.get(pilot.corp_id, 'Unknown')
-                    pilot.alliance_name = names.get(
-                        pilot.alliance_id) if pilot.alliance_id else None
+                    pilot.alliance_name = names.get(pilot.alliance_id) if pilot.alliance_id else None
                 pilot.corp_alliance_resolved = True
 
             pilot.stats_link = self.stats_provider.get_link(pilot.char_id)
@@ -206,8 +213,7 @@ class PilotService:
                 pilot.error_msg = f"Retry in {int(stats.get('retry_after', 0))}s"
             else:
                 pilot.state = PilotState.CACHE_HIT if pilot.stats else PilotState.ERROR
-                pilot.error_msg = stats.get(
-                    'error', 'unknown') if stats else 'unknown'
+                pilot.error_msg = stats.get('error', 'unknown') if stats else 'unknown'
         except Exception as e:
             pilot.state = PilotState.CACHE_HIT if pilot.stats else PilotState.ERROR
             pilot.error_msg = str(e)
@@ -226,8 +232,7 @@ class PilotService:
                 pilot.corp_id = new_corp_id
                 pilot.alliance_id = new_alliance_id
                 pilot.corp_name = names.get(new_corp_id, 'Unknown')
-                pilot.alliance_name = names.get(
-                    new_alliance_id) if new_alliance_id else None
+                pilot.alliance_name = names.get(new_alliance_id) if new_alliance_id else None
 
             pilot.corp_alliance_resolved = True
         except Exception as e:
