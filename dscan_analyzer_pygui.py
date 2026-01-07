@@ -6,6 +6,7 @@ from global_hotkeys import register_hotkeys
 from overlay import OverlayWindow, WindowManager
 from config import C
 from services import PilotService, DScanService, PilotState
+from services.dscan_service import get_dscan_info_url
 from pilot_color_classifier import PilotColorClassifier
 
 def bgr_to_rgb(color):
@@ -71,6 +72,16 @@ class DScanAnalyzer:
             for entity in grp.get('entities', [])
         }
         
+        self.group_cfg = {
+            name: {
+                'entities': set(grp.get('entities', [])),
+                'color': bgr_to_rgb(tuple(grp.get('color', [255, 255, 255])))
+            }
+            for name, grp in dscan_cfg.get('groups', {}).items()
+        }
+        
+        self.ignore_list = set(dscan_cfg.get('ignore', []))
+        
         self.aggr_mode = False
         self.aggr_mode_manual = None
         self.aggr_threshold = dscan_cfg.get('aggregated_mode_threshold', 50)
@@ -78,6 +89,8 @@ class DScanAnalyzer:
         self.aggr_toggle_requested = False
         self.aggr_collapse_state = {"corps": False, "dscan_groups": {}}
         self.alliance_colors = {}
+        self.alliance_ids = {}
+        self.corp_ids = {}
     
     def on_overlay_toggle(self, enabled):
         if enabled:
@@ -157,6 +170,23 @@ class DScanAnalyzer:
         if link := self.pilot_links.get(sender):
             webbrowser.open(link)
     
+    def on_header_click(self, sender, app_data, user_data):
+        dpg.set_value(sender, False)
+        if self.last_clip:
+            url = get_dscan_info_url(self.last_clip)
+            if url:
+                webbrowser.open(url)
+    
+    def on_alliance_click(self, sender, app_data, user_data):
+        dpg.set_value(sender, False)
+        if alliance_id := user_data:
+            webbrowser.open(f"https://zkillboard.com/alliance/{alliance_id}/")
+    
+    def on_corp_click(self, sender, app_data, user_data):
+        dpg.set_value(sender, False)
+        if corp_id := user_data:
+            webbrowser.open(f"https://zkillboard.com/corporation/{corp_id}/")
+    
     def get_pilot_tag_color(self, pilot):
         return next(
             (self.groups[v] for attr in ('name', 'corp_name', 'alliance_name') 
@@ -167,7 +197,7 @@ class DScanAnalyzer:
     def get_pilot_color(self, pilot):
         if pilot.state in STATE_COLORS:
             return STATE_COLORS[pilot.state]
-        if pilot.state in (PilotState.CACHE_HIT, PilotState.FOUND) and pilot.stats:
+        if pilot.state in (PilotState.CACHE_HIT, PilotState.FOUND):
             return bgr_to_rgb(self.pilot_classifier.get_color(pilot.stats))
         return (200, 200, 200)
     
@@ -205,6 +235,11 @@ class DScanAnalyzer:
             self.pilot_themes[text_color] = self.create_pilot_theme(text_color)
         dpg.bind_item_theme(sel_tag, self.pilot_themes[text_color])
     
+    def _is_ignored(self, pilot):
+        return (pilot.name in self.ignore_list or 
+                pilot.corp_name in self.ignore_list or 
+                pilot.alliance_name in self.ignore_list)
+    
     def render_pilots(self):
         if dpg.does_item_exist("dscan_content"):
             dpg.delete_item("dscan_content")
@@ -220,6 +255,7 @@ class DScanAnalyzer:
         if self.aggr_mode:
             self.render_pilots_aggregated(visible)
         else:
+            visible = [(n, p) for n, p in visible if not self._is_ignored(p)]
             self.render_pilots_normal(visible)
     
     def render_pilots_normal(self, visible):
@@ -228,7 +264,8 @@ class DScanAnalyzer:
         
         if not dpg.does_item_exist("pilot_list"):
             dpg.add_group(tag="pilot_list", parent="main")
-            dpg.add_text("", tag="pilot_header", parent="pilot_list", color=(0, 255, 0))
+            dpg.add_selectable(label="", tag="pilot_header", parent="pilot_list", callback=self.on_header_click)
+            dpg.bind_item_theme("pilot_header", self._get_header_selectable_theme((0, 255, 0)))
         
         remaining = self.get_remaining_time()
         
@@ -236,14 +273,14 @@ class DScanAnalyzer:
             self.timeout_expired = True
         
         if self.timeout_expired and self.overlay.is_overlay_mode():
-            dpg.configure_item("pilot_header", default_value="")
+            dpg.configure_item("pilot_header", label="")
             for i in range(self.rendered_cnt):
                 if dpg.does_item_exist(f"row_{i}"):
                     dpg.delete_item(f"row_{i}")
             self.rendered_cnt = 0
             return
         
-        dpg.configure_item("pilot_header", default_value=f"{len(visible)} | {remaining:.0f}s")
+        dpg.configure_item("pilot_header", label=f"{len(visible)} | {remaining:.0f}s")
         
         for i in range(len(visible), self.rendered_cnt):
             if dpg.does_item_exist(f"row_{i}"):
@@ -261,37 +298,91 @@ class DScanAnalyzer:
         
         self._save_aggr_collapse_state()
         
-        if dpg.does_item_exist("aggr_content"):
-            dpg.delete_item("aggr_content")
-        
         remaining = self.get_remaining_time()
         if self.overlay.is_overlay_mode() and remaining <= 0:
             self.timeout_expired = True
         
         if self.timeout_expired and self.overlay.is_overlay_mode():
+            if dpg.does_item_exist("aggr_content"):
+                dpg.delete_item("aggr_content")
             return
         
-        alliance_counts, corps_by_alliance, no_alliance_corps = self._aggregate_pilots(visible)
-        
+        alliance_counts, corps_by_alliance, no_alliance_corps, group_counts = self._aggregate_pilots(visible)
         header_theme = self._create_header_theme()
+        total = len(visible)
         
+        needs_rebuild = self._aggr_needs_rebuild(alliance_counts, corps_by_alliance, no_alliance_corps, group_counts)
+        
+        if needs_rebuild:
+            if dpg.does_item_exist("aggr_content"):
+                dpg.delete_item("aggr_content")
+            self._build_aggr_content(total, remaining, group_counts, alliance_counts, 
+                                     corps_by_alliance, no_alliance_corps, header_theme)
+            self._aggr_last_state = {
+                'alliances': set(alliance_counts.keys()),
+                'corps': {a: set(c['name'] for c in corps) for a, corps in corps_by_alliance.items()},
+                'no_alliance_corps': set(c['name'] for c in no_alliance_corps),
+                'groups': set(k for k, v in group_counts.items() if v > 0)
+            }
+        else:
+            self._update_aggr_content(total, remaining, group_counts, alliance_counts,
+                                      corps_by_alliance, no_alliance_corps)
+    
+    def _aggr_needs_rebuild(self, alliance_counts, corps_by_alliance, no_alliance_corps, group_counts):
+        if not dpg.does_item_exist("aggr_content"):
+            return True
+        if not hasattr(self, '_aggr_last_state'):
+            return True
+        last = self._aggr_last_state
+        if set(alliance_counts.keys()) != last['alliances']:
+            return True
+        for a, corps in corps_by_alliance.items():
+            if a not in last['corps'] or set(c['name'] for c in corps) != last['corps'][a]:
+                return True
+        if set(c['name'] for c in no_alliance_corps) != last['no_alliance_corps']:
+            return True
+        if set(k for k, v in group_counts.items() if v > 0) != last['groups']:
+            return True
+        return False
+    
+    def _build_aggr_content(self, total, remaining, group_counts, alliance_counts,
+                            corps_by_alliance, no_alliance_corps, header_theme):
         with dpg.group(tag="aggr_content", parent="main"):
-            total = len(visible)
-            dpg.add_text(f"Total: {total} | {remaining:.0f}s", tag="aggr_header")
-            dpg.bind_item_theme("aggr_header", self._get_text_theme((0, 255, 0)))
+            dpg.add_selectable(label=f"{total} | {remaining:.0f}s", tag="aggr_header", callback=self.on_header_click)
+            dpg.bind_item_theme("aggr_header", self._get_header_selectable_theme((0, 255, 0)))
+            
+            if any(group_counts.values()):
+                with dpg.group(horizontal=True, tag="aggr_grp_row"):
+                    for grp_name, cnt in group_counts.items():
+                        if cnt > 0:
+                            color = self.group_cfg[grp_name]['color']
+                            tag = f"aggr_grp_{grp_name}"
+                            dpg.add_text(f"{grp_name}: {cnt}  ", tag=tag)
+                            dpg.bind_item_theme(tag, self._get_text_theme(color))
+            
             dpg.add_separator()
             
+            sorted_alliances = sorted(alliance_counts.items(), 
+                                      key=lambda x: (x[0] == "No Alliance", -x[1]))
+            alliance_labels = [f"  {'[No Alliance]' if a == 'No Alliance' else a}: {c}" for a, c in sorted_alliances]
+            max_w = max((dpg.get_text_size(lbl)[0] for lbl in alliance_labels), default=100) + 20
+            
             with dpg.group(horizontal=True):
-                with dpg.group(tag="aggr_left_col", width=200):
+                with dpg.group(tag="aggr_left_col", width=max_w):
                     dpg.add_text("Alliances:", tag="aggr_alliance_label")
                     dpg.bind_item_theme("aggr_alliance_label", self._get_text_theme((255, 255, 0)))
                     
-                    sorted_alliances = sorted(alliance_counts.items(), key=lambda x: -x[1])
                     for i, (alliance, cnt) in enumerate(sorted_alliances):
+                        display_name = "[No Alliance]" if alliance == "No Alliance" else alliance
                         color = self.alliance_colors.get(alliance, DEFAULT_ALLIANCE_COLOR)
                         tag = f"aggr_alliance_{i}"
-                        dpg.add_text(f"  {alliance}: {cnt}", tag=tag)
-                        dpg.bind_item_theme(tag, self._get_text_theme(color))
+                        alliance_id = self.alliance_ids.get(alliance)
+                        if alliance_id:
+                            dpg.add_selectable(label=f"  {display_name}: {cnt}", tag=tag, callback=self.on_alliance_click, user_data=alliance_id)
+                            dpg.bind_item_theme(tag, self._get_clickable_text_theme(color))
+                        else:
+                            dpg.add_text(f"  {display_name}: {cnt}", tag=tag)
+                            dpg.bind_item_theme(tag, self._get_text_theme(color))
                 
                 with dpg.group(tag="aggr_right_col"):
                     is_open = self.aggr_collapse_state.get("corps", False)
@@ -301,27 +392,74 @@ class DScanAnalyzer:
                         sorted_alliance_corps = sorted(corps_by_alliance.items(), key=lambda x: -alliance_counts.get(x[0], 0))
                         for j, (alliance, corps) in enumerate(sorted_alliance_corps):
                             corps = sorted(corps, key=lambda x: -x["count"])
+                            display_name = "[No Alliance]" if alliance == "No Alliance" else alliance
                             color = self.alliance_colors.get(alliance, DEFAULT_ALLIANCE_COLOR)
                             alliance_open = self.aggr_collapse_state.get(alliance, False)
                             alliance_total = alliance_counts.get(alliance, 0)
                             tag = f"aggr_alliance_corps_{j}"
-                            with dpg.collapsing_header(label=f"{alliance}: {alliance_total}", default_open=alliance_open, tag=tag, indent=10):
+                            with dpg.collapsing_header(label=f"{display_name}: {alliance_total}", default_open=alliance_open, tag=tag, indent=10):
                                 dpg.bind_item_theme(tag, self._create_colored_header_theme(color))
                                 for k, c in enumerate(corps):
                                     ctag = f"aggr_corp_{j}_{k}"
-                                    dpg.add_text(f"  {c['name']}: {c['count']}", tag=ctag)
-                                    dpg.bind_item_theme(ctag, self._get_text_theme(color))
+                                    corp_id = self.corp_ids.get(c['name'])
+                                    if corp_id:
+                                        dpg.add_selectable(label=f"  {c['name']}: {c['count']}", tag=ctag, callback=self.on_corp_click, user_data=corp_id)
+                                        dpg.bind_item_theme(ctag, self._get_clickable_text_theme(color))
+                                    else:
+                                        dpg.add_text(f"  {c['name']}: {c['count']}", tag=ctag)
+                                        dpg.bind_item_theme(ctag, self._get_text_theme(color))
                         
                         if no_alliance_corps:
                             for k, c in enumerate(sorted(no_alliance_corps, key=lambda x: -x["count"])):
                                 ctag = f"aggr_corp_none_{k}"
-                                dpg.add_text(f"  {c['name']}: {c['count']}", tag=ctag)
-                                dpg.bind_item_theme(ctag, self._get_text_theme(DEFAULT_ALLIANCE_COLOR))
+                                corp_id = self.corp_ids.get(c['name'])
+                                if corp_id:
+                                    dpg.add_selectable(label=f"  {c['name']}: {c['count']}", tag=ctag, callback=self.on_corp_click, user_data=corp_id)
+                                    dpg.bind_item_theme(ctag, self._get_clickable_text_theme(DEFAULT_ALLIANCE_COLOR))
+                                else:
+                                    dpg.add_text(f"  {c['name']}: {c['count']}", tag=ctag)
+                                    dpg.bind_item_theme(ctag, self._get_text_theme(DEFAULT_ALLIANCE_COLOR))
+    
+    def _update_aggr_content(self, total, remaining, group_counts, alliance_counts,
+                             corps_by_alliance, no_alliance_corps):
+        dpg.configure_item("aggr_header", label=f"{total} | {remaining:.0f}s")
+        
+        for grp_name, cnt in group_counts.items():
+            tag = f"aggr_grp_{grp_name}"
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, default_value=f"{grp_name}: {cnt}  ")
+        
+        sorted_alliances = sorted(alliance_counts.items(), 
+                                  key=lambda x: (x[0] == "No Alliance", -x[1]))
+        for i, (alliance, cnt) in enumerate(sorted_alliances):
+            display_name = "[No Alliance]" if alliance == "No Alliance" else alliance
+            tag = f"aggr_alliance_{i}"
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, label=f"  {display_name}: {cnt}")
+        
+        sorted_alliance_corps = sorted(corps_by_alliance.items(), key=lambda x: -alliance_counts.get(x[0], 0))
+        for j, (alliance, corps) in enumerate(sorted_alliance_corps):
+            corps = sorted(corps, key=lambda x: -x["count"])
+            alliance_total = alliance_counts.get(alliance, 0)
+            display_name = "[No Alliance]" if alliance == "No Alliance" else alliance
+            tag = f"aggr_alliance_corps_{j}"
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, label=f"{display_name}: {alliance_total}")
+            for k, c in enumerate(corps):
+                ctag = f"aggr_corp_{j}_{k}"
+                if dpg.does_item_exist(ctag):
+                    dpg.configure_item(ctag, label=f"  {c['name']}: {c['count']}")
+        
+        for k, c in enumerate(sorted(no_alliance_corps, key=lambda x: -x["count"])):
+            ctag = f"aggr_corp_none_{k}"
+            if dpg.does_item_exist(ctag):
+                dpg.configure_item(ctag, label=f"  {c['name']}: {c['count']}")
     
     def _aggregate_pilots(self, visible):
         alliance_counts = {}
         corp_counts = {}
         pilot_alliances = {}
+        group_counts = {name: 0 for name in self.group_cfg}
         
         for name, pilot in visible:
             alliance = pilot.alliance_name or "No Alliance"
@@ -331,12 +469,22 @@ class DScanAnalyzer:
             corp_counts[corp] = corp_counts.get(corp, 0) + 1
             pilot_alliances[corp] = alliance
             
+            if pilot.alliance_id and pilot.alliance_name:
+                self.alliance_ids[pilot.alliance_name] = pilot.alliance_id
+            if pilot.corp_id and pilot.corp_name:
+                self.corp_ids[pilot.corp_name] = pilot.corp_id
+            
             if alliance not in self.alliance_colors and pilot.alliance_name:
                 color = self.groups.get(pilot.alliance_name)
-                if not color:
-                    color = self.get_pilot_color(pilot)
-                if color and color != (200, 200, 200):
+                if color:
                     self.alliance_colors[alliance] = color
+            
+            for grp_name, grp_data in self.group_cfg.items():
+                if (pilot.name in grp_data['entities'] or 
+                    pilot.corp_name in grp_data['entities'] or 
+                    pilot.alliance_name in grp_data['entities']):
+                    group_counts[grp_name] += 1
+                    break
         
         corps_by_alliance = {}
         no_alliance_corps = []
@@ -349,7 +497,7 @@ class DScanAnalyzer:
             else:
                 no_alliance_corps.append(corp_data)
         
-        return alliance_counts, corps_by_alliance, no_alliance_corps
+        return alliance_counts, corps_by_alliance, no_alliance_corps, group_counts
     
     def _save_aggr_collapse_state(self):
         if dpg.does_item_exist("aggr_corp_header"):
@@ -391,6 +539,32 @@ class DScanAnalyzer:
                     dpg.add_theme_color(dpg.mvThemeCol_Text, color)
             self.pilot_themes[color] = theme
         return self.pilot_themes[color]
+    
+    def _get_header_selectable_theme(self, color):
+        key = f"header_sel_{color}"
+        if key not in self.pilot_themes:
+            bg = tuple(self.overlay.colorkey)
+            with dpg.theme() as theme:
+                with dpg.theme_component(dpg.mvSelectable):
+                    dpg.add_theme_color(dpg.mvThemeCol_Text, color)
+                    dpg.add_theme_color(dpg.mvThemeCol_Header, bg)
+                    dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (80, 80, 80, 150))
+                    dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (80, 80, 80, 150))
+            self.pilot_themes[key] = theme
+        return self.pilot_themes[key]
+    
+    def _get_clickable_text_theme(self, color):
+        key = f"clickable_{color}"
+        if key not in self.pilot_themes:
+            bg = tuple(self.overlay.colorkey)
+            with dpg.theme() as theme:
+                with dpg.theme_component(dpg.mvSelectable):
+                    dpg.add_theme_color(dpg.mvThemeCol_Text, color)
+                    dpg.add_theme_color(dpg.mvThemeCol_Header, bg)
+                    dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (80, 80, 80, 150))
+                    dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (80, 80, 80, 150))
+            self.pilot_themes[key] = theme
+        return self.pilot_themes[key]
     
     def render_dscan(self):
         res = self.dscan_svc.last_result
@@ -440,8 +614,8 @@ class DScanAnalyzer:
             ships_by_group.setdefault(grp, []).append((ship, cnt, diff))
         
         with dpg.group(tag="dscan_content", parent="main"):
-            dpg.add_text(f"{res.total_ships} | {remaining:.0f}s", tag="dscan_header")
-            dpg.bind_item_theme("dscan_header", self._get_text_theme((0, 255, 0)))
+            dpg.add_selectable(label=f"{res.total_ships} | {remaining:.0f}s", tag="dscan_header", callback=self.on_header_click)
+            dpg.bind_item_theme("dscan_header", self._get_header_selectable_theme((0, 255, 0)))
             
             with dpg.group(horizontal=True):
                 with dpg.group(tag="dscan_left_col", width=200):
