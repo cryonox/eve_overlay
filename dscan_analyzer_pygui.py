@@ -51,6 +51,7 @@ class DScanAnalyzer:
         self.last_clip = ""
         self.mode = None
         self.themes = {}
+        self._load_ui_state()
         
         self.timeout_duration = dscan_cfg.get('timeout', 10)
         self.diff_timeout = dscan_cfg.get('diff_timeout', 60)
@@ -97,6 +98,82 @@ class DScanAnalyzer:
             if self.result_start_time and not self.pause_start_time:
                 self.pause_start_time = time.time()
             self.timeout_expired = False
+        self._save_ui_state()
+        self._update_zoom_slider_visibility()
+
+    def _load_ui_state(self):
+        from config import dict2attrdict
+        state = C.get('dscan_uistate', {})
+        self.ui_scale = float(state.get('scale', 1.0))
+        self._overlay_enabled = state.get('overlay', False)
+    
+    def _save_ui_state(self):
+        from config import dict2attrdict
+        C.dscan_uistate = dict2attrdict({
+            'scale': self.ui_scale,
+            'overlay': self.overlay.is_overlay_mode()
+        })
+        C.write(['dscan_uistate'], 'config.state.yaml')
+    
+    def _apply_saved_overlay_state(self):
+        if self._overlay_enabled and not self.overlay.is_overlay_mode():
+            self.overlay.toggle()
+            if self.overlay._on_toggle:
+                self.overlay._on_toggle(self.overlay.enabled)
+        self._update_zoom_slider_visibility()
+
+    def _create_scaled_font(self, scale):
+        if dpg.does_item_exist("font_registry"):
+            return
+        with dpg.font_registry(tag="font_registry"):
+            self.font = dpg.add_font(C.dscan.font, self.base_font_size)
+        dpg.bind_font(self.font)
+    
+    def _create_zoom_slider(self):
+        self.slider_h = None
+        with dpg.group(tag="zoom_container", parent="main"):
+            dpg.add_slider_float(
+                tag="zoom_slider",
+                default_value=self.ui_scale,
+                min_value=0.5,
+                max_value=2.0,
+                width=-1,
+                format="",
+                callback=self._on_zoom_change
+            )
+    
+    def _on_zoom_change(self, sender, val):
+        self.ui_scale = val
+        dpg.set_global_font_scale(val)
+        self.slider_h = None
+        self._save_ui_state()
+    
+    def _update_zoom_slider_visibility(self):
+        if not dpg.does_item_exist("zoom_container"):
+            return
+        
+        if dpg.does_item_exist("zoom_slider") and self.slider_h is None:
+            self.slider_h = dpg.get_item_rect_size("zoom_slider")[1]
+        
+        is_overlay = self.overlay.is_overlay_mode()
+        slider_exists = dpg.does_item_exist("zoom_slider")
+        spacer_exists = dpg.does_item_exist("zoom_spacer")
+        
+        if is_overlay and slider_exists and self.slider_h:
+            dpg.delete_item("zoom_slider")
+            dpg.add_spacer(tag="zoom_spacer", height=self.slider_h, parent="zoom_container")
+        elif not is_overlay and spacer_exists:
+            dpg.delete_item("zoom_spacer")
+            dpg.add_slider_float(
+                tag="zoom_slider",
+                default_value=self.ui_scale,
+                min_value=0.5,
+                max_value=2.0,
+                width=-1,
+                format="",
+                callback=self._on_zoom_change,
+                parent="zoom_container"
+            )
 
     def get_elapsed_time(self):
         if not self.result_start_time:
@@ -112,9 +189,8 @@ class DScanAnalyzer:
     def setup_gui(self):
         dpg.create_context()
         
-        with dpg.font_registry():
-            self.font = dpg.add_font(C.dscan.font, int(16 * self.win_mgr.dpi_scale))
-        dpg.bind_font(self.font)
+        self.base_font_size = int(16 * self.win_mgr.dpi_scale)
+        self._create_scaled_font(self.ui_scale)
         
         win_x, win_y, win_w, win_h = self.win_mgr.load()
         dpg.create_viewport(title=WIN_TITLE, width=win_w, height=win_h, always_on_top=True,
@@ -129,6 +205,7 @@ class DScanAnalyzer:
                     dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 0, 0)
                     dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 0, 0)
             dpg.bind_item_theme("main", "no_border")
+            self._create_zoom_slider()
         
         self._setup_click_handler()
         self._setup_aggr_hotkey()
@@ -137,6 +214,8 @@ class DScanAnalyzer:
         dpg.show_viewport()
         dpg.render_dearpygui_frame()
         self.win_mgr.apply()
+        dpg.set_global_font_scale(self.ui_scale)
+        self._apply_saved_overlay_state()
     
     def _setup_click_handler(self):
         with dpg.handler_registry(tag="global_click"):
