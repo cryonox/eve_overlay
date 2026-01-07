@@ -209,3 +209,6 @@ class OverlayWindow:
         if self.enabled:
             return self.disable()
         return self.enable()
+    
+    def is_overlay_mode(self):
+        return self.enabled

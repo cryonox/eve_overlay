@@ -46,7 +46,11 @@ class PilotService:
         return True
 
     def get_pilots(self) -> Dict[str, PilotData]:
-        return self._pilots
+        def sort_key(item):
+            p = item[1]
+            kills = p.stats.get('kills', -1) if p.stats else -1
+            return -kills
+        return dict(sorted(self._pilots.items(), key=sort_key))
 
     def reset(self):
         self._pilots = {}
