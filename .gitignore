@@ -9,3 +9,4 @@ cache/char_info.pkl
 cache/ids.pkl
 cache/mappings.pkl
 cache/stats.pkl
+.kiro/

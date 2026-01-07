@@ -7,6 +7,7 @@ from tqdm import tqdm
 import pickle
 from loguru import logger
 
+
 class CacheManager:
     def __init__(self, cache_dir='cache'):
         self.cache_dir = Path(cache_dir)
@@ -20,7 +21,7 @@ class CacheManager:
         self._corp_id_to_name = None
         self._alliance_id_to_name = None
         self._cache_loaded = False
-        
+
     def load_cache(self):
         if self._cache_loaded:
             return
@@ -61,7 +62,8 @@ class CacheManager:
                 logger.info(f"  IDs loaded: {idx:,} total")
                 logger.info("  Saving IDs cache...")
                 with open(ids_pkl_path, 'wb') as f:
-                    pickle.dump(self._tid2id, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(self._tid2id, f,
+                                protocol=pickle.HIGHEST_PROTOCOL)
 
         char_info_pkl_path = self.cache_dir / 'char_info.pkl'
         if self._char_info is None:
@@ -69,7 +71,8 @@ class CacheManager:
                 logger.info("  Loading char info (cached)...")
                 with open(char_info_pkl_path, 'rb') as f:
                     self._char_info = pickle.load(f)
-                logger.info(f"  Char info loaded: {len(self._char_info):,} total")
+                logger.info(
+                    f"  Char info loaded: {len(self._char_info):,} total")
             elif char_info_path.exists():
                 logger.info("  Loading char info (first run)...")
                 with open(char_info_path, 'rb') as f:
@@ -80,14 +83,16 @@ class CacheManager:
                     try:
                         corp_id, _ = leb128.i.decode_reader(bio)
                         alliance_id, _ = leb128.i.decode_reader(bio)
-                        self._char_info[idx] = None if corp_id == 0 else (corp_id, alliance_id)
+                        self._char_info[idx] = None if corp_id == 0 else (
+                            corp_id, alliance_id)
                         idx += 1
                     except:
                         break
                 logger.info(f"  Char info loaded: {idx:,} total")
                 logger.info("  Saving char info cache...")
                 with open(char_info_pkl_path, 'wb') as f:
-                    pickle.dump(self._char_info, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(self._char_info, f,
+                                protocol=pickle.HIGHEST_PROTOCOL)
 
         stats_path = self.cache_dir / 'stats.bin'
         stats_pkl_path = self.cache_dir / 'stats.pkl'
@@ -107,14 +112,16 @@ class CacheManager:
                     try:
                         kills, _ = leb128.i.decode_reader(bio)
                         losses, _ = leb128.i.decode_reader(bio)
-                        self._stats[idx] = None if kills == 0 and losses == 0 else (kills, losses)
+                        self._stats[idx] = None if kills == 0 and losses == 0 else (
+                            kills, losses)
                         idx += 1
                     except:
                         break
                 logger.info(f"  Stats loaded: {idx:,} total")
                 logger.info("  Saving stats cache...")
                 with open(stats_pkl_path, 'wb') as f:
-                    pickle.dump(self._stats, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(self._stats, f,
+                                protocol=pickle.HIGHEST_PROTOCOL)
 
         if mappings_path.exists():
             logger.info("  Loading precomputed mappings...")
@@ -139,7 +146,8 @@ class CacheManager:
                     self._corp_id_to_name[self._tid2id[tid]] = name[1:]
                 elif name.startswith('@'):
                     self._alliance_id_to_name[self._tid2id[tid]] = name[1:]
-            logger.info(f"  Name mappings built: {len(self._name2tid):,} total")
+            logger.info(
+                f"  Name mappings built: {len(self._name2tid):,} total")
             logger.info("  Saving mappings for faster future loads...")
             mappings = {
                 'name2tid': self._name2tid,
@@ -152,7 +160,7 @@ class CacheManager:
 
         self._cache_loaded = True
         logger.info("Cache loading complete")
-    
+
     def get_tid(self, name):
         return self._name2tid.get(name)
 
@@ -160,27 +168,26 @@ class CacheManager:
         if self._tid2id and 0 <= trie_id < len(self._tid2id):
             return self._tid2id[trie_id]
         return None
-    
+
     def get_names_by_tids_batch(self, trie_ids):
         if not self._tid2name:
             return {}
         return {tid: self._tid2name[tid] for tid in trie_ids if tid in self._tid2name}
-    
+
     def get_ids_by_tids_batch(self, trie_ids):
         if not self._tid2id:
             return {}
-        return {tid: self._tid2id[tid] 
-               for tid in trie_ids 
-               if 0 <= tid < len(self._tid2id)}
-    
+        return {tid: self._tid2id[tid]
+                for tid in trie_ids
+                if 0 <= tid < len(self._tid2id)}
+
     def get_tids_batch(self, names):
         if not self._name2tid:
             return {}
         return {name: self._name2tid[name] for name in names if name in self._name2tid}
-    
 
     def build_cache(self, chars_file='test_data/char_data/extracted_characters_active.json',
-                           corps_alliances_file='test_data/char_data/corps_alliances_with_names.json'):
+                    corps_alliances_file='test_data/char_data/corps_alliances_with_names.json'):
 
         logger.info("Loading character data...")
         with open(chars_file, 'r', encoding='utf-8') as f:
@@ -207,7 +214,8 @@ class CacheManager:
                 alliance_id = entry.get('alliance_id') or 0
                 char_info_data.append((corp_id, alliance_id))
 
-        logger.info(f"Processing {len(corp_ally_data['corporations'])} corporations...")
+        logger.info(
+            f"Processing {len(corp_ally_data['corporations'])} corporations...")
         for corp_id, corp_name in tqdm(corp_ally_data['corporations'].items(), desc="Processing corporations"):
             if corp_name and corp_name != 'Unknown':
                 corp_id_to_name[int(corp_id)] = corp_name
@@ -215,7 +223,8 @@ class CacheManager:
                 ids_data.append(int(corp_id))
                 char_info_data.append((0, 0))
 
-        logger.info(f"Processing {len(corp_ally_data['alliances'])} alliances...")
+        logger.info(
+            f"Processing {len(corp_ally_data['alliances'])} alliances...")
         for alliance_id, alliance_name in tqdm(corp_ally_data['alliances'].items(), desc="Processing alliances"):
             if alliance_name and alliance_name != 'Unknown':
                 alliance_id_to_name[int(alliance_id)] = alliance_name
@@ -256,13 +265,13 @@ class CacheManager:
                 f.write(leb128.i.encode(alliance_id))
 
         logger.info(f"Built cache with {len(names)} entries")
-        logger.info(f"Cache saved to {trie_path}, {ids_path}, {char_info_path}")
+        logger.info(
+            f"Cache saved to {trie_path}, {ids_path}, {char_info_path}")
 
         return trie
 
-    
     def test_cache(self, chars_file='test_data/char_data/extracted_characters_active.json',
-                          corps_alliances_file='corps_alliances_with_names.json'):
+                   corps_alliances_file='corps_alliances_with_names.json'):
         logger.info("Testing cache...")
 
         with open(chars_file, 'r', encoding='utf-8') as f:
@@ -289,7 +298,8 @@ class CacheManager:
                 else:
                     cached_id = self.get_id_by_tid(tid)
                     if cached_id != char_id:
-                        logger.warning(f"Char ID mismatch: {char_name} -> expected {char_id}, got {cached_id}")
+                        logger.warning(
+                            f"Char ID mismatch: {char_name} -> expected {char_id}, got {cached_id}")
                         errors += 1
                 total_tested += 1
 
@@ -303,7 +313,8 @@ class CacheManager:
                 else:
                     cached_id = self.get_id_by_tid(tid)
                     if cached_id != int(corp_id):
-                        logger.warning(f"Corp ID mismatch: {prefixed_name} -> expected {corp_id}, got {cached_id}")
+                        logger.warning(
+                            f"Corp ID mismatch: {prefixed_name} -> expected {corp_id}, got {cached_id}")
                         errors += 1
                 total_tested += 1
 
@@ -317,7 +328,8 @@ class CacheManager:
                 else:
                     cached_id = self.get_id_by_tid(tid)
                     if cached_id != int(alliance_id):
-                        logger.warning(f"Alliance ID mismatch: {prefixed_name} -> expected {alliance_id}, got {cached_id}")
+                        logger.warning(
+                            f"Alliance ID mismatch: {prefixed_name} -> expected {alliance_id}, got {cached_id}")
                         errors += 1
                 total_tested += 1
 
@@ -325,23 +337,25 @@ class CacheManager:
         return errors == 0
 
     def get_char_info(self, char_name):
-        
+
         tid = self.get_tid(char_name)
         if tid is None:
             return None
-        
+
         char_id = self.get_id_by_tid(tid)
         if char_id is None:
             return None
-        
+
         if not self._char_info or tid >= len(self._char_info) or self._char_info[tid] is None:
             return None
-        
+
         corp_id, alliance_id = self._char_info[tid]
-        
-        corp_name = self._corp_id_to_name.get(corp_id, 'Unknown') if corp_id else 'Unknown'
-        alliance_name = self._alliance_id_to_name.get(alliance_id) if alliance_id else None
-        
+
+        corp_name = self._corp_id_to_name.get(
+            corp_id, 'Unknown') if corp_id else 'Unknown'
+        alliance_name = self._alliance_id_to_name.get(
+            alliance_id) if alliance_id else None
+
         return {
             'char_id': char_id,
             'corp_id': corp_id,
@@ -373,6 +387,7 @@ class CacheManager:
         with open(fpath, 'rb') as f:
             return pickle.load(f)
 
+
 if __name__ == "__main__":
     cache = CacheManager()
     cache.build_cache()
@@ -382,16 +397,19 @@ if __name__ == "__main__":
     if info:
         logger.info(f"Char ID: {info['char_id']}")
         logger.info(f"Corp: {info['corp_name']} ({info['corp_id']})")
-        logger.info(f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
+        logger.info(
+            f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
 
     info = cache.get_char_info("cryonox dps1")
     if info:
         logger.info(f"Char ID: {info['char_id']}")
         logger.info(f"Corp: {info['corp_name']} ({info['corp_id']})")
-        logger.info(f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
+        logger.info(
+            f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
 
     info = cache.get_char_info("cryonox bubbly")
     if info:
         logger.info(f"Char ID: {info['char_id']}")
         logger.info(f"Corp: {info['corp_name']} ({info['corp_id']})")
-        logger.info(f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
+        logger.info(
+            f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
