@@ -14,6 +14,9 @@ def bgr_to_rgb(color):
 WIN_TITLE = "dscan_analyzer"
 TAG_W = 4
 DEFAULT_ALLIANCE_COLOR = (200, 200, 200)
+DIFF_POSITIVE_COLOR = (0, 255, 0)
+DIFF_NEGATIVE_COLOR = (255, 80, 80)
+DIFF_NEUTRAL_COLOR = (200, 200, 200)
 
 STATE_COLORS = {
     PilotState.SEARCHING_ESI: (255, 255, 0),
@@ -50,8 +53,10 @@ class DScanAnalyzer:
         self.pilot_themes = {}
         self.pilot_links = {}
         self.rendered_cnt = 0
+        self.dscan_rendered_cnt = 0
         
         self.timeout_duration = dscan_cfg.get('timeout', 10)
+        self.diff_timeout = dscan_cfg.get('diff_timeout', 60)
         self.result_start_time = None
         self.paused_time = 0
         self.pause_start_time = None
@@ -71,7 +76,7 @@ class DScanAnalyzer:
         self.aggr_threshold = dscan_cfg.get('aggregated_mode_threshold', 50)
         self.aggr_hotkey = dscan_cfg.get('hotkey_mode', 'alt+shift+m')
         self.aggr_toggle_requested = False
-        self.aggr_collapse_state = {"corps": False}
+        self.aggr_collapse_state = {"corps": False, "dscan_groups": {}}
         self.alliance_colors = {}
     
     def on_overlay_toggle(self, enabled):
@@ -201,6 +206,9 @@ class DScanAnalyzer:
         dpg.bind_item_theme(sel_tag, self.pilot_themes[text_color])
     
     def render_pilots(self):
+        if dpg.does_item_exist("dscan_content"):
+            dpg.delete_item("dscan_content")
+        
         pilots = self.pilot_svc.get_pilots()
         visible = [(n, p) for n, p in pilots.items() 
                    if p.state != PilotState.NOT_FOUND or p.char_id is not None]
@@ -385,11 +393,104 @@ class DScanAnalyzer:
         return self.pilot_themes[color]
     
     def render_dscan(self):
-        if not (res := self.dscan_svc.last_result):
+        res = self.dscan_svc.last_result
+        if not res:
             return
-        lines = [f"DScan: {res.total_ships} ships"]
-        lines.extend(f"  {ship}: {cnt}" for grp, ships in res.ship_counts.items() for ship, cnt in ships.items())
-        dpg.set_value("output", "\n".join(lines))
+        
+        self._save_dscan_collapse_state()
+        
+        if dpg.does_item_exist("pilot_list"):
+            dpg.delete_item("pilot_list")
+        self.rendered_cnt = 0
+        
+        if dpg.does_item_exist("dscan_content"):
+            dpg.delete_item("dscan_content")
+        
+        remaining = self.get_remaining_time()
+        if self.overlay.is_overlay_mode() and remaining <= 0:
+            self.timeout_expired = True
+        
+        if self.timeout_expired and self.overlay.is_overlay_mode():
+            return
+        
+        ship_diffs = self.dscan_svc.get_ship_diffs()
+        group_totals = self.dscan_svc.get_group_totals()
+        group_diffs = self.dscan_svc.get_group_diffs()
+        
+        ship_list = []
+        for grp, ships in res.ship_counts.items():
+            for ship, cnt in ships.items():
+                ship_list.append((ship, cnt, ship_diffs.get(ship, 0), grp))
+        
+        if self.dscan_svc.previous_result:
+            cur_ships = {s for ships in res.ship_counts.values() for s in ships}
+            for grp, ships in self.dscan_svc.previous_result.ship_counts.items():
+                for ship, prev_cnt in ships.items():
+                    if ship not in cur_ships:
+                        ship_list.append((ship, 0, -prev_cnt, grp))
+            for grp in self.dscan_svc.previous_result.ship_counts:
+                if grp not in group_totals:
+                    group_totals[grp] = 0
+        
+        ship_list.sort(key=lambda x: (x[1] == 0, -x[1]))
+        sorted_groups = sorted(group_totals.items(), key=lambda x: -x[1])
+        
+        ships_by_group = {}
+        for ship, cnt, diff, grp in ship_list:
+            ships_by_group.setdefault(grp, []).append((ship, cnt, diff))
+        
+        with dpg.group(tag="dscan_content", parent="main"):
+            dpg.add_text(f"{res.total_ships} | {remaining:.0f}s", tag="dscan_header")
+            dpg.bind_item_theme("dscan_header", self._get_text_theme((0, 255, 0)))
+            
+            with dpg.group(horizontal=True):
+                with dpg.group(tag="dscan_left_col", width=200):
+                    dpg.add_spacer(height=dpg.get_text_size("X")[1])
+                    for i, (ship, cnt, diff, _) in enumerate(ship_list[:30]):
+                        diff_str = f" (+{diff})" if diff > 0 else f" ({diff})" if diff < 0 else ""
+                        color = DIFF_POSITIVE_COLOR if diff > 0 else DIFF_NEGATIVE_COLOR if diff < 0 else DIFF_NEUTRAL_COLOR
+                        tag = f"dscan_ship_{i}"
+                        dpg.add_text(f"  {ship}: {cnt}{diff_str}", tag=tag)
+                        dpg.bind_item_theme(tag, self._get_text_theme(color))
+                
+                with dpg.group(tag="dscan_right_col"):
+                    is_open = self.aggr_collapse_state.get("dscan_groups", {}).get("main", True)
+                    header_theme = self._create_header_theme()
+                    with dpg.collapsing_header(label="Categories", default_open=is_open, tag="dscan_groups_header"):
+                        dpg.bind_item_theme("dscan_groups_header", header_theme)
+                        
+                        for j, (grp, cnt) in enumerate(sorted_groups):
+                            grp_diff = group_diffs.get(grp, 0)
+                            diff_str = f" (+{grp_diff})" if grp_diff > 0 else f" ({grp_diff})" if grp_diff < 0 else ""
+                            color = DIFF_POSITIVE_COLOR if grp_diff > 0 else DIFF_NEGATIVE_COLOR if grp_diff < 0 else DIFF_NEUTRAL_COLOR
+                            
+                            grp_open = self.aggr_collapse_state.get("dscan_groups", {}).get(grp, False)
+                            grp_tag = f"dscan_grp_{j}"
+                            with dpg.collapsing_header(label=f"{grp}: {cnt}{diff_str}", default_open=grp_open, tag=grp_tag, indent=10):
+                                dpg.bind_item_theme(grp_tag, self._create_colored_header_theme(color))
+                                
+                                grp_ships = ships_by_group.get(grp, [])
+                                for k, (ship, ship_cnt, ship_diff) in enumerate(grp_ships):
+                                    ship_diff_str = f" (+{ship_diff})" if ship_diff > 0 else f" ({ship_diff})" if ship_diff < 0 else ""
+                                    ship_color = DIFF_POSITIVE_COLOR if ship_diff > 0 else DIFF_NEGATIVE_COLOR if ship_diff < 0 else DIFF_NEUTRAL_COLOR
+                                    ship_tag = f"dscan_grp_{j}_ship_{k}"
+                                    dpg.add_text(f"  {ship}: {ship_cnt}{ship_diff_str}", tag=ship_tag)
+                                    dpg.bind_item_theme(ship_tag, self._get_text_theme(ship_color))
+    
+    def _save_dscan_collapse_state(self):
+        if dpg.does_item_exist("dscan_groups_header"):
+            if "dscan_groups" not in self.aggr_collapse_state:
+                self.aggr_collapse_state["dscan_groups"] = {}
+            self.aggr_collapse_state["dscan_groups"]["main"] = dpg.get_value("dscan_groups_header")
+        for j in range(50):
+            tag = f"dscan_grp_{j}"
+            if dpg.does_item_exist(tag):
+                label = dpg.get_item_label(tag)
+                grp = label.rsplit(":", 1)[0].strip() if ":" in label else label
+                grp = grp.split("(")[0].strip() if "(" in grp else grp
+                if "dscan_groups" not in self.aggr_collapse_state:
+                    self.aggr_collapse_state["dscan_groups"] = {}
+                self.aggr_collapse_state["dscan_groups"][grp] = dpg.get_value(tag)
     
     def check_clipboard(self):
         try:
@@ -402,7 +503,7 @@ class DScanAnalyzer:
         
         self.last_clip = clip
         
-        if self.dscan_svc.is_dscan_format(clip) and self.dscan_svc.is_valid_dscan(clip) and self.dscan_svc.parse(clip):
+        if self.dscan_svc.is_dscan_format(clip) and self.dscan_svc.is_valid_dscan(clip) and self.dscan_svc.parse(clip, self.diff_timeout):
             self.mode = 'dscan'
             self.reset_timeout()
         elif self.pilot_svc.set_pilots(clip):
