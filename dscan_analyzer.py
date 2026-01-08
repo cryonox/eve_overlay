@@ -47,12 +47,12 @@ class DScanAnalyzer:
         )
         self.dscan_svc = DScanService()
         
-        bg_color_cfg = dscan_cfg.get('bg_color', None)
-        bg_color = tuple(bg_color_cfg) if bg_color_cfg else None
-        
+        bg_color = dscan_cfg.get('bg_color', None)
+        transparency = dscan_cfg.get('transparency', 255)
+
         self.mgr = OverlayManager(
             WIN_TITLE, C, win_key='dscan_winstate', ui_key='dscan_uistate',
-            bg_color=bg_color,
+            bg_color=bg_color, transparency=transparency,
             hotkey_overlay=dscan_cfg.get('hotkey_overlay'),
             hotkey_clickthrough=dscan_cfg.get('hotkey_clickthrough'),
             hotkey_transparent=dscan_cfg.get('hotkey_bg'),
@@ -88,7 +88,9 @@ class DScanAnalyzer:
         }
         
         self.ignore_list = set(dscan_cfg.get('ignore', []))
-        
+        hc = dscan_cfg.get('hover_color', None)
+        self.hover_color = tuple(hc) if hc else None
+
         self.aggr_mode = False
         self.aggr_mode_manual = None
         self.aggr_threshold = dscan_cfg.get('aggregated_mode_threshold', 50)
@@ -296,9 +298,18 @@ class DScanAnalyzer:
             self.themes[key] = theme
         return self.themes[key]
     
+    def _get_hover_bg(self):
+        if self.hover_color:
+            r, g, b = self.hover_color
+            return (r, g, b, 255)
+        r, g, b = self.mgr.bg_color
+        if r >= 225 and g >= 225 and b >= 225:
+            return (max(r - 30, 0), max(g - 30, 0), max(b - 30, 0), 255)
+        return (min(r + 30, 255), min(g + 30, 255), min(b + 30, 255), 255)
+
     def _btn_theme(self, color):
-        bg = self.mgr.bg_color if self.mgr.text_bg else self.mgr.colorkey
-        hover_bg = (80, 80, 80, 255) if self.mgr.text_bg else (60, 60, 60, 255)
+        bg = self.mgr.bg_color_rgba if self.mgr.text_bg else self.mgr.colorkey_rgba
+        hover_bg = self._get_hover_bg()
         key = f"btn_{color}_{bg}"
         if key not in self.themes:
             with dpg.theme() as theme:
@@ -312,10 +323,10 @@ class DScanAnalyzer:
                     dpg.add_theme_style(dpg.mvStyleVar_ButtonTextAlign, 0, 0.5)
             self.themes[key] = theme
         return self.themes[key]
-    
+
     def _header_theme(self, color=None, is_open=False):
-        bg = self.mgr.bg_color if self.mgr.text_bg else self.mgr.colorkey
-        hover_bg = (80, 80, 80, 255) if self.mgr.text_bg else (60, 60, 60, 255)
+        bg = self.mgr.bg_color_rgba if self.mgr.text_bg else self.mgr.colorkey_rgba
+        hover_bg = self._get_hover_bg()
         key = f"hdr_{color}_{bg}_{is_open}"
         if key not in self.themes:
             with dpg.theme() as theme:

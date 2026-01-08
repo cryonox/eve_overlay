@@ -20,8 +20,8 @@ class OverlayManager:
     DEFAULT_HOTKEY_CLICKTHROUGH = "alt + shift + c"
     DEFAULT_HOTKEY_TRANSPARENT = "alt + shift + b"
     
-    def __init__(self, title, cfg, state_file='config.state.yaml', win_key='winstate', ui_key='uistate', 
-                 colorkey=None, bg_color=None, hotkey_overlay=None, hotkey_clickthrough=None, 
+    def __init__(self, title, cfg, state_file='config.state.yaml', win_key='winstate', ui_key='uistate',
+                 colorkey=None, bg_color=None, transparency=255, hotkey_overlay=None, hotkey_clickthrough=None,
                  hotkey_transparent=None, on_toggle=None):
         self._title = title
         self._cfg = cfg
@@ -30,36 +30,41 @@ class OverlayManager:
         self._ui_key = ui_key
         self._last_state = None
         self._dpi_scale = self._get_dpi_scale()
-        
+
         self.colorkey = colorkey or self.DEFAULT_COLORKEY
         self.colorkey_rgb = self.colorkey[0] | (self.colorkey[1] << 8) | (self.colorkey[2] << 16)
-        self.bg_color = bg_color or (40, 40, 40)
-        
+        self.bg_color = tuple(bg_color[:3]) if bg_color else (40, 40, 40)
+        self.transparency = max(0, min(255, int(transparency)))
+
         self.overlay = False
         self.clickthrough = False
         self.text_bg = False
-        
+
         self._saved_style = None
         self._saved_exstyle = None
         self._saved_client_rect = None
         self._saved_client_pos = None
         self._saved_window_pos = None
-        
+
         self._toggle_overlay_requested = False
         self._toggle_clickthrough_requested = False
         self._toggle_text_bg_requested = False
-        
+
         self._on_toggle = on_toggle
         self._hotkey_overlay = hotkey_overlay or self.DEFAULT_HOTKEY_OVERLAY
         self._hotkey_clickthrough = hotkey_clickthrough or self.DEFAULT_HOTKEY_CLICKTHROUGH
         self._hotkey_text_bg = hotkey_transparent or self.DEFAULT_HOTKEY_TRANSPARENT
-        
+
         self._pending_state = None
         self._setup_hotkeys()
-    
+
     @property
     def colorkey_rgba(self):
         return [self.colorkey[0], self.colorkey[1], self.colorkey[2], 255]
+
+    @property
+    def bg_color_rgba(self):
+        return (*self.bg_color, 255)
     
     @property
     def dpi_scale(self):
@@ -247,19 +252,20 @@ class OverlayManager:
         hwnd = self.hwnd
         if not hwnd or self._saved_style is None:
             return False
-        
+
         style = self._saved_style & ~win32con.WS_CAPTION & ~win32con.WS_THICKFRAME & ~win32con.WS_SYSMENU
         win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
-        
+
         exstyle = self._saved_exstyle | win32con.WS_EX_LAYERED
         if self.clickthrough:
             exstyle |= win32con.WS_EX_TRANSPARENT
         else:
             exstyle &= ~win32con.WS_EX_TRANSPARENT
         win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, exstyle)
-        
-        win32gui.SetLayeredWindowAttributes(hwnd, self.colorkey_rgb, 0, win32con.LWA_COLORKEY)
-        
+
+        win32gui.SetLayeredWindowAttributes(hwnd, self.colorkey_rgb, self.transparency,
+                                            win32con.LWA_COLORKEY | win32con.LWA_ALPHA)
+
         win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, self._saved_client_pos[0], self._saved_client_pos[1],
                               self._saved_client_rect[0], self._saved_client_rect[1],
                               win32con.SWP_FRAMECHANGED)

@@ -95,7 +95,6 @@ def create_default_config(fpath):
             'hotkey_bg': 'alt+shift+b',
             'hotkey_mode': 'alt+shift+m',
             'hotkey_clear_cache': 'alt+shift+e',
-            'transparency_on': True,
             'font_scale': 0.5,
             'font_thickness': 1,
             'transparency': 180,

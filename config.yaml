@@ -22,7 +22,7 @@ dscan:
   transparency: 180
   transparency_color: [64, 64, 64]
   transparency_on: true
-  hover_color: [80, 80, 255] 
+  hover_color: null
   groups:
     blue:
       entities: [The Initiative.]
