@@ -1,96 +1,179 @@
+import dearpygui.dearpygui as dpg
 import pyperclip
-import time
-from typing import Optional, Dict
-from config import C
-import cv2
-import numpy as np
-import utils
-from global_hotkeys import register_hotkeys, start_checking_hotkeys
 import webbrowser
-from loguru import logger
-import win32gui
-import win32api
+import time
+from global_hotkeys import register_hotkeys
+from overlay import OverlayWindow, WindowManager
+from config import C
+from services import PilotService, DScanService, PilotState
+from services.dscan_service import get_dscan_info_url
 from pilot_color_classifier import PilotColorClassifier
 
-# Import from services
-from services import PilotService, DScanService, PilotData, PilotState
-from services.dscan_service import get_dscan_info_url
+def bgr_to_rgb(color):
+    return (color[2], color[1], color[0])
 
+WIN_TITLE = "dscan_analyzer"
+TAG_W = 4
+DEFAULT_ALLIANCE_COLOR = (200, 200, 200)
+DIFF_POSITIVE_COLOR = (0, 255, 0)
+DIFF_NEGATIVE_COLOR = (255, 80, 80)
+DIFF_NEUTRAL_COLOR = (200, 200, 200)
+
+STATE_COLORS = {
+    PilotState.SEARCHING_ESI: (255, 255, 0),
+    PilotState.SEARCHING_STATS: (255, 255, 0),
+    PilotState.NOT_FOUND: (128, 128, 128),
+    PilotState.ERROR: (255, 0, 0),
+    PilotState.RATE_LIMITED: (255, 165, 0),
+}
+
+STATE_LABELS = {
+    PilotState.SEARCHING_ESI: "Resolving...",
+    PilotState.SEARCHING_STATS: "Fetching stats...",
+    PilotState.NOT_FOUND: "Not found",
+    PilotState.RATE_LIMITED: "Rate limited",
+}
 
 class DScanAnalyzer:
     def __init__(self):
-        self.ignore = set(C.dscan.get('ignore', []))
-        self.display_duration = C.dscan.get('timeout', 10)
-        self.stats_limit = C.dscan.get('aggregated_mode_threshold', 50)
-        self.win_name = "D-Scan Analysis"
-        self.transparency_on = C.dscan.get('transparency_on', True)
-        self.transparency = C.dscan.get('transparency', 180)
-        self.bg_color = C.dscan.get('bg_color', [25, 25, 25])
-        self.should_destroy_window = False
-        self.last_im = None
-        self.last_result_im = None
-        self.char_rects = {}
+        cache_dir = C.get('cache', 'cache')
+        dscan_cfg = C.dscan
+        
+        self.pilot_svc = PilotService(
+            cache_dir, 
+            dscan_cfg.get('stats_provider', 'zkill'),
+            dscan_cfg.get('rate_limit_retry_delay', 5),
+            dscan_cfg.get('aggregated_mode_threshold', 50)
+        )
+        self.dscan_svc = DScanService()
+        self.win_mgr = WindowManager(WIN_TITLE, C, cfg_key='dscan_winstate')
+        self.overlay = OverlayWindow(WIN_TITLE, on_toggle=self.on_overlay_toggle)
+        self.last_clip = ""
+        self.mode = None
+        self.themes = {}
+        self._load_ui_state()
+        
+        self.timeout_duration = dscan_cfg.get('timeout', 10)
+        self.diff_timeout = dscan_cfg.get('diff_timeout', 60)
         self.result_start_time = None
-        self.last_result_total_time = None
         self.paused_time = 0
         self.pause_start_time = None
+        self.timeout_expired = False
+        
+        pilot_colors_cfg = dscan_cfg.get('pilot_colors', {})
+        self.pilot_classifier = PilotColorClassifier(pilot_colors_cfg) if pilot_colors_cfg else PilotColorClassifier.create_default()
+        
+        self.groups = {
+            entity: bgr_to_rgb(tuple(grp.get('color', [255, 255, 255])))
+            for grp in dscan_cfg.get('groups', {}).values()
+            for entity in grp.get('entities', [])
+        }
+        
+        self.group_cfg = {
+            name: {
+                'entities': set(grp.get('entities', [])),
+                'color': bgr_to_rgb(tuple(grp.get('color', [255, 255, 255])))
+            }
+            for name, grp in dscan_cfg.get('groups', {}).items()
+        }
+        
+        self.ignore_list = set(dscan_cfg.get('ignore', []))
+        
+        self.aggr_mode = False
+        self.aggr_mode_manual = None
+        self.aggr_threshold = dscan_cfg.get('aggregated_mode_threshold', 50)
+        self.aggr_hotkey = dscan_cfg.get('hotkey_mode', 'alt+shift+m')
+        self.aggr_toggle_requested = False
+        self.collapse_state = {"corps": False, "dscan_groups": {}}
+        self.alliance_colors = {}
+        self.alliance_ids = {}
+        self.corp_ids = {}
+    
+    def on_overlay_toggle(self, enabled):
+        if enabled:
+            if self.pause_start_time:
+                self.paused_time += time.time() - self.pause_start_time
+                self.pause_start_time = None
+        else:
+            if self.result_start_time and not self.pause_start_time:
+                self.pause_start_time = time.time()
+            self.timeout_expired = False
+        self._save_ui_state()
+        self._update_zoom_slider_visibility()
 
-        self.groups = []
-        self.entity_to_group = {}
-        groups_cfg = C.dscan.get('groups', {})
-        for grp_name, grp_data in groups_cfg.items():
-            entities = grp_data.get('entities', [])
-            color = tuple(grp_data.get('color', [255, 255, 255]))
-            self.groups.append(
-                {'name': grp_name, 'entities': set(entities), 'color': color})
-            for entity in entities:
-                self.entity_to_group[entity] = {
-                    'name': grp_name, 'color': color, 'order': len(self.groups) - 1}
+    def _load_ui_state(self):
+        from config import dict2attrdict
+        state = C.get('dscan_uistate', {})
+        self.ui_scale = float(state.get('scale', 1.0))
+        self._overlay_enabled = state.get('overlay', False)
+    
+    def _save_ui_state(self):
+        from config import dict2attrdict
+        C.dscan_uistate = dict2attrdict({
+            'scale': self.ui_scale,
+            'overlay': self.overlay.is_overlay_mode()
+        })
+        C.write(['dscan_uistate'], 'config.state.yaml')
+    
+    def _apply_saved_overlay_state(self):
+        if self._overlay_enabled and not self.overlay.is_overlay_mode():
+            self.overlay.toggle()
+            if self.overlay._on_toggle:
+                self.overlay._on_toggle(self.overlay.enabled)
+        self._update_zoom_slider_visibility()
 
-        # Initialize services
-        cache_dir = C.get('cache', 'cache')
-        stats_provider = C.dscan.get('stats_provider', 'zkill')
-        rate_limit_delay = C.dscan.get('rate_limit_retry_delay', 5)
-        diff_timeout = C.dscan.get('diff_timeout', 60)
-
-        self.pilot_service = PilotService(
-            cache_dir, stats_provider, rate_limit_delay)
-        self.dscan_service = DScanService()
-        self.diff_timeout = diff_timeout
-
-        pilot_colors_cfg = C.dscan.get('pilot_colors', {})
-        self.pilot_classifier = PilotColorClassifier(
-            pilot_colors_cfg) if pilot_colors_cfg else PilotColorClassifier.create_default()
-
-        self.pilots: Dict[str, PilotData] = {}
-        self.is_local = False
-        self.is_dscan = False
-        self.aggregated_mode = False
-        self.last_clipboard: Optional[str] = None
-        self.header_rect: Optional[tuple] = None
-        self.hovered_rect: Optional[str] = None
-        self.mouse_pos: tuple = (0, 0)
-        self.hover_color = tuple(C.dscan.get('hover_color', [80, 80, 80]))
-
-        cv2.namedWindow(self.win_name, cv2.WINDOW_AUTOSIZE)
-        cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
-        cv2.setMouseCallback(self.win_name, self.mouse_callback)
-
-        if self.transparency_on:
-            utils.win_transparent(
-                'Main HighGUI class', self.win_name, self.transparency, (64, 64, 64))
-
-        hotkey_transparency = C.dscan.get('hotkey_transparency', 'alt+shift+f')
-        hotkey_mode = C.dscan.get('hotkey_mode', 'alt+shift+m')
-        hotkey_clear_cache = C.dscan.get('hotkey_clear_cache', 'alt+shift+e')
-        bindings = [
-            [hotkey_transparency.split('+'), None, self.toggle_transparency],
-            [hotkey_mode.split('+'), None, self.toggle_mode],
-            [hotkey_clear_cache.split('+'), None, self.clear_cache]
-        ]
-        register_hotkeys(bindings)
-        start_checking_hotkeys()
-        self.show_status("")
+    def _create_scaled_font(self, scale):
+        if dpg.does_item_exist("font_registry"):
+            return
+        with dpg.font_registry(tag="font_registry"):
+            self.font = dpg.add_font(C.dscan.font, self.base_font_size)
+        dpg.bind_font(self.font)
+    
+    def _create_zoom_slider(self):
+        self.slider_h = None
+        with dpg.group(tag="zoom_container", parent="main"):
+            dpg.add_slider_float(
+                tag="zoom_slider",
+                default_value=self.ui_scale,
+                min_value=0.5,
+                max_value=2.0,
+                width=-1,
+                format="",
+                callback=self._on_zoom_change
+            )
+    
+    def _on_zoom_change(self, sender, val):
+        self.ui_scale = val
+        dpg.set_global_font_scale(val)
+        self.slider_h = None
+        self._save_ui_state()
+    
+    def _update_zoom_slider_visibility(self):
+        if not dpg.does_item_exist("zoom_container"):
+            return
+        
+        if dpg.does_item_exist("zoom_slider") and self.slider_h is None:
+            self.slider_h = dpg.get_item_rect_size("zoom_slider")[1]
+        
+        is_overlay = self.overlay.is_overlay_mode()
+        slider_exists = dpg.does_item_exist("zoom_slider")
+        spacer_exists = dpg.does_item_exist("zoom_spacer")
+        
+        if is_overlay and slider_exists and self.slider_h:
+            dpg.delete_item("zoom_slider")
+            dpg.add_spacer(tag="zoom_spacer", height=self.slider_h, parent="zoom_container")
+        elif not is_overlay and spacer_exists:
+            dpg.delete_item("zoom_spacer")
+            dpg.add_slider_float(
+                tag="zoom_slider",
+                default_value=self.ui_scale,
+                min_value=0.5,
+                max_value=2.0,
+                width=-1,
+                format="",
+                callback=self._on_zoom_change,
+                parent="zoom_container"
+            )
 
     def get_elapsed_time(self):
         if not self.result_start_time:
@@ -99,501 +182,477 @@ class DScanAnalyzer:
         if self.pause_start_time:
             elapsed -= time.time() - self.pause_start_time
         return elapsed
-
-    def toggle_transparency(self):
-        self.transparency_on = not self.transparency_on
-        self.should_destroy_window = True
-        if self.transparency_on:
-            if self.pause_start_time:
-                self.paused_time += time.time() - self.pause_start_time
-                self.pause_start_time = None
-        else:
-            if self.result_start_time and not self.pause_start_time:
-                self.pause_start_time = time.time()
-
-    def toggle_mode(self):
-        self.aggregated_mode = not self.aggregated_mode
-
-    def clear_cache(self):
-        self.pilot_service.clear_caches()
-        logger.info("Caches cleared")
-
-    def handle_transparency(self):
-        if self.should_destroy_window:
-            cv2.destroyWindow(self.win_name)
-            cv2.namedWindow(self.win_name, cv2.WINDOW_AUTOSIZE)
-            cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
-            cv2.setMouseCallback(self.win_name, self.mouse_callback)
-            if self.transparency_on:
-                cv2.setWindowProperty(
-                    self.win_name, cv2.WND_PROP_ASPECT_RATIO, cv2.WINDOW_FREERATIO)
-                utils.win_transparent(
-                    'Main HighGUI class', self.win_name, self.transparency, (64, 64, 64))
-            self.should_destroy_window = False
-            im = self.last_result_im if self.last_result_im is not None else self.last_im
-            if im is not None:
-                cv2.imshow(self.win_name, im)
-                cv2.waitKey(1)
-
-    def show_status(self, msg):
-        if msg == "":
-            im = np.full((50, 50, 3), C.dscan.transparency_color, np.uint8)
-        else:
-            im = utils.draw_text_withnewline(msg, (10, 10), color=(255, 255, 255),
-                                             bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        self.last_im = im
-        cv2.imshow(self.win_name, im)
-        cv2.waitKey(1)
-
-    def mouse_callback(self, event, x, y, flags, param):
-        self.mouse_pos = (x, y)
-        if event == cv2.EVENT_MOUSEMOVE:
-            self.update_hover_state(x, y)
-        elif event == cv2.EVENT_LBUTTONDOWN:
-            if self.header_rect and self.last_clipboard:
-                hx, hy, hw, hh = self.header_rect
-                if hx <= x <= hx + hw and hy <= y <= hy + hh:
-                    url = get_dscan_info_url(self.last_clipboard)
-                    if url:
-                        webbrowser.open(url)
-                    return
-            for _, (rect, link) in self.char_rects.items():
-                rx, ry, rw, rh = rect
-                if rx <= x <= rx + rw and ry <= y <= ry + rh and link:
-                    webbrowser.open(link)
-                    break
-
-    def get_mouse_pos_in_window(self) -> Optional[tuple]:
-        try:
-            hwnd = win32gui.FindWindow('Main HighGUI class', self.win_name)
-            if not hwnd:
-                return None
-            cx, cy = win32api.GetCursorPos()
-            wx, wy, _, _ = win32gui.GetWindowRect(hwnd)
-            return (cx - wx, cy - wy)
-        except:
-            return None
-
-    def update_hover_state_global(self):
-        if not self.transparency_on:
-            return
-        pos = self.get_mouse_pos_in_window()
-        if not pos:
-            self.hovered_rect = None
-            return
-        x, y = pos
-        self.update_hover_state(x, y)
-
-    def update_hover_state(self, x: int, y: int):
-        new_hovered = None
-        if self.header_rect and self.last_clipboard:
-            hx, hy, hw, hh = self.header_rect
-            if hx <= x <= hx + hw and hy <= y <= hy + hh:
-                new_hovered = '__header__'
-        if not new_hovered:
-            for name, (rect, link) in self.char_rects.items():
-                if link:
-                    rx, ry, rw, rh = rect
-                    if rx <= x <= rx + rw and ry <= y <= ry + rh:
-                        new_hovered = name
-                        break
-        self.hovered_rect = new_hovered
-
-    def apply_hover_highlight(self, im: np.ndarray) -> np.ndarray:
-        if not self.hovered_rect or self.transparency_on:
-            return im
-        im = im.copy()
-        if self.hovered_rect == '__header__' and self.header_rect:
-            hx, hy, hw, hh = self.header_rect
-            cv2.rectangle(im, (hx - 2, hy - 2), (hx + hw + 2,
-                          hy + hh + 2), self.hover_color, 2)
-        elif self.hovered_rect in self.char_rects:
-            rect, _ = self.char_rects[self.hovered_rect]
-            rx, ry, rw, rh = rect
-            cv2.rectangle(im, (rx - 2, ry - 2), (rx + rw + 2,
-                          ry + rh + 2), self.hover_color, 2)
-        return im
-
-    def match_pilot_entity(self, pilot: PilotData, entities: set) -> Optional[str]:
-        for attr in ('name', 'corp_name', 'alliance_name'):
-            val = getattr(pilot, attr, None)
-            if val and val in entities:
-                return val
-        return None
-
-    def should_ignore_pilot(self, pilot: PilotData) -> bool:
-        return self.match_pilot_entity(pilot, self.ignore) is not None
-
-    def get_pilot_group(self, pilot: PilotData) -> Optional[Dict]:
-        matched = self.match_pilot_entity(
-            pilot, set(self.entity_to_group.keys()))
-        return self.entity_to_group.get(matched) if matched else None
-
-    def process_local(self, clipboard_data: str):
-        """Process clipboard data as pilot list using PilotService."""
-        char_names = self.pilot_service.parse_pilot_list(clipboard_data)
-        if not char_names:
-            self.show_status("")
-            return
-
-        self.pilots = self.pilot_service.lookup_from_cache(char_names)
-        self.result_start_time = time.time()
-        self.paused_time = 0
-        self.pause_start_time = None
-
-        skip_stats = len(char_names) > self.stats_limit
-        if skip_stats:
-            self.aggregated_mode = True
-
-        self.pilot_service.fetch_missing_data(self.pilots, skip_stats)
-
-    def parse_dscan(self, dscan_data: str):
-        """Parse dscan data using DScanService."""
-        result = self.dscan_service.parse(dscan_data, self.diff_timeout)
-        if result is None or result.is_empty:
-            self.show_status("No ships found")
-            return
-
-        self.result_start_time = time.time()
-        self.paused_time = 0
-        self.pause_start_time = None
-
-    def parse_clipboard(self, clipboard_data: str):
-        if self.dscan_service.is_dscan_format(clipboard_data):
-            if self.dscan_service.is_valid_dscan(clipboard_data):
-                self.is_dscan = True
-                self.is_local = False
-                self.parse_dscan(clipboard_data)
-            return
-
-        if self.pilot_service.parse_pilot_list(clipboard_data):
-            self.is_dscan = False
-            self.is_local = True
-            self.process_local(clipboard_data)
-
-    def create_pilot_display(self) -> Optional[np.ndarray]:
-        if not self.pilots:
-            return None
-
-        self.char_rects = {}
-        display_data = []
-        rect_w = C.dscan.get('group_rect_width', 3)
-
-        for name, pilot in self.pilots.items():
-            if self.should_ignore_pilot(pilot):
+    
+    def get_remaining_time(self):
+        return max(0, self.timeout_duration - self.get_elapsed_time())
+    
+    def setup_gui(self):
+        dpg.create_context()
+        
+        self.base_font_size = int(16 * self.win_mgr.dpi_scale)
+        self._create_scaled_font(self.ui_scale)
+        
+        win_x, win_y, win_w, win_h = self.win_mgr.load()
+        dpg.create_viewport(title=WIN_TITLE, width=win_w, height=win_h, always_on_top=True,
+                            clear_color=self.overlay.colorkey_rgba, x_pos=win_x, y_pos=win_y)
+        dpg.setup_dearpygui()
+        
+        with dpg.window(tag="main", no_title_bar=True, no_move=True, no_resize=True,
+                        no_background=True, no_scrollbar=True):
+            with dpg.theme(tag="no_border"):
+                with dpg.theme_component(dpg.mvAll):
+                    dpg.add_theme_style(dpg.mvStyleVar_WindowBorderSize, 0)
+                    dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 0, 0)
+                    dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 0, 0)
+            dpg.bind_item_theme("main", "no_border")
+            self._create_zoom_slider()
+        
+        self._setup_click_handler()
+        self._setup_aggr_hotkey()
+        
+        dpg.set_primary_window("main", True)
+        dpg.show_viewport()
+        dpg.render_dearpygui_frame()
+        self.win_mgr.apply()
+        dpg.set_global_font_scale(self.ui_scale)
+        self._apply_saved_overlay_state()
+    
+    def _setup_click_handler(self):
+        with dpg.handler_registry(tag="global_click"):
+            dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Left, callback=self._on_global_click)
+    
+    def _on_global_click(self, sender, app_data):
+        for tag in dpg.get_all_items():
+            if not dpg.does_item_exist(tag):
                 continue
+            try:
+                if not dpg.is_item_hovered(tag):
+                    continue
+            except:
+                continue
+            user_data = dpg.get_item_user_data(tag)
+            if not user_data:
+                continue
+            action, data = user_data
+            if action == "pilot":
+                dpg.set_value(tag, False)
+                webbrowser.open(data)
+            elif action == "header":
+                dpg.set_value(tag, False)
+                if url := get_dscan_info_url(self.last_clip):
+                    webbrowser.open(url)
+            elif action == "alliance":
+                dpg.set_value(tag, False)
+                webbrowser.open(f"https://zkillboard.com/alliance/{data}/")
+            elif action == "corp":
+                dpg.set_value(tag, False)
+                webbrowser.open(f"https://zkillboard.com/corporation/{data}/")
+            break
 
-            entry = {'name': name[:20], 'pilot': pilot,
-                     'link': pilot.stats_link}
-            grp = self.get_pilot_group(pilot)
-            entry['group'] = grp
+    def _setup_aggr_hotkey(self):
+        bindings = [[self.aggr_hotkey, None, self._request_aggr_toggle, True]]
+        register_hotkeys(bindings)
+    
+    def _request_aggr_toggle(self):
+        self.aggr_toggle_requested = True
+    
+    def process_aggr_hotkey(self):
+        if not self.aggr_toggle_requested:
+            return False
+        self.aggr_toggle_requested = False
+        self.aggr_mode_manual = not self.aggr_mode if self.aggr_mode_manual is None else not self.aggr_mode_manual
+        return True
+    
+    def _get_theme(self, key, component, colors):
+        if key not in self.themes:
+            with dpg.theme() as theme:
+                with dpg.theme_component(component):
+                    for col_type, col_val in colors:
+                        dpg.add_theme_color(col_type, col_val)
+            self.themes[key] = theme
+        return self.themes[key]
+    
+    def _text_theme(self, color):
+        return self._get_theme(color, dpg.mvText, [(dpg.mvThemeCol_Text, color)])
+    
+    def _selectable_theme(self, color, hover=False):
+        key = f"sel_{color}_{hover}"
+        bg = tuple(self.overlay.colorkey)
+        hover_bg = (80, 80, 80, 150) if hover else bg
+        return self._get_theme(key, dpg.mvSelectable, [
+            (dpg.mvThemeCol_Text, color),
+            (dpg.mvThemeCol_Header, bg),
+            (dpg.mvThemeCol_HeaderHovered, hover_bg),
+            (dpg.mvThemeCol_HeaderActive, hover_bg),
+        ])
+    
+    def _header_theme(self, color=None):
+        key = f"hdr_{color}"
+        bg = tuple(self.overlay.colorkey)
+        colors = [(dpg.mvThemeCol_Header, bg), (dpg.mvThemeCol_HeaderHovered, bg), (dpg.mvThemeCol_HeaderActive, bg)]
+        if color:
+            colors.insert(0, (dpg.mvThemeCol_Text, color))
+        return self._get_theme(key, dpg.mvCollapsingHeader, colors)
 
-            if pilot.state == PilotState.SEARCHING_ESI:
-                entry['text'] = f"{entry['name']} | Resolving..."
-                entry['color'] = (255, 255, 0)
-            elif pilot.state == PilotState.SEARCHING_STATS:
-                entry['text'] = f"{entry['name']} | Fetching stats..."
-                entry['color'] = (255, 255, 0)
-            elif pilot.state == PilotState.NOT_FOUND:
-                entry['text'] = f"{entry['name']} | Not found"
-                entry['color'] = (128, 128, 128)
-            elif pilot.state == PilotState.ERROR:
-                entry['text'] = f"{entry['name']} | Error"
-                entry['color'] = (0, 0, 255)
-            elif pilot.state == PilotState.RATE_LIMITED:
-                entry['text'] = f"{entry['name']} | Rate limited"
-                entry['color'] = (0, 165, 255)
-            elif pilot.state in [PilotState.CACHE_HIT, PilotState.FOUND]:
-                if pilot.stats:
-                    d, k, l = pilot.stats.get('danger', 0), pilot.stats.get(
-                        'kills', 0), pilot.stats.get('losses', 0)
-                    entry['text'] = f"{entry['name']} | D:{d:.0f} K:{k} L:{l}"
-                    entry['color'] = self.pilot_classifier.get_color(
-                        pilot.stats)
-                    entry['kills'] = k
-                else:
-                    entry['text'] = f"{entry['name']} | [Cached]"
-                    entry['color'] = (200, 200, 200)
-                    entry['kills'] = -1
+    def get_pilot_tag_color(self, pilot):
+        return next(
+            (self.groups[v] for attr in ('name', 'corp_name', 'alliance_name') 
+             if (v := getattr(pilot, attr, None)) and v in self.groups),
+            None
+        )
+    
+    def get_pilot_color(self, pilot):
+        if pilot.state in STATE_COLORS:
+            return STATE_COLORS[pilot.state]
+        if pilot.state in (PilotState.CACHE_HIT, PilotState.FOUND):
+            return bgr_to_rgb(self.pilot_classifier.get_color(pilot.stats))
+        return (200, 200, 200)
+    
+    def format_pilot(self, name, pilot):
+        if pilot.state == PilotState.ERROR:
+            return f"{name} | {pilot.error_msg or 'Error'}"
+        if pilot.state in STATE_LABELS:
+            return f"{name} | {STATE_LABELS[pilot.state]}"
+        if pilot.state in (PilotState.CACHE_HIT, PilotState.FOUND) and pilot.stats:
+            s = pilot.stats
+            return f"{name} | D:{s.get('danger', 0):.0f} K:{s.get('kills', 0)} L:{s.get('losses', 0)}"
+        return f"{name} | {pilot.state.name}"
+    
+    def _is_ignored(self, pilot):
+        return (pilot.name in self.ignore_list or 
+                pilot.corp_name in self.ignore_list or 
+                pilot.alliance_name in self.ignore_list)
+    
+    def _save_collapse_state(self):
+        if dpg.does_item_exist("aggr_corp_header"):
+            self.collapse_state["corps"] = dpg.get_value("aggr_corp_header")
+        for i in range(100):
+            tag = f"aggr_alliance_corps_{i}"
+            if dpg.does_item_exist(tag):
+                label = dpg.get_item_label(tag)
+                alliance = label.rsplit(":", 1)[0] if ":" in label else label
+                self.collapse_state[alliance] = dpg.get_value(tag)
+        if dpg.does_item_exist("dscan_groups_header"):
+            if "dscan_groups" not in self.collapse_state:
+                self.collapse_state["dscan_groups"] = {}
+            self.collapse_state["dscan_groups"]["main"] = dpg.get_value("dscan_groups_header")
+        for j in range(50):
+            tag = f"dscan_grp_{j}"
+            if dpg.does_item_exist(tag):
+                label = dpg.get_item_label(tag)
+                grp = label.rsplit(":", 1)[0].strip() if ":" in label else label
+                grp = grp.split("(")[0].strip() if "(" in grp else grp
+                if "dscan_groups" not in self.collapse_state:
+                    self.collapse_state["dscan_groups"] = {}
+                self.collapse_state["dscan_groups"][grp] = dpg.get_value(tag)
+
+    def render_pilots(self):
+        if dpg.does_item_exist("dscan_content"):
+            dpg.delete_item("dscan_content")
+        
+        pilots = self.pilot_svc.get_pilots()
+        visible = [(n, p) for n, p in pilots.items() 
+                   if p.state != PilotState.NOT_FOUND or p.char_id is not None]
+        
+        pilot_cnt = len(visible)
+        auto_aggr = pilot_cnt > self.aggr_threshold
+        self.aggr_mode = self.aggr_mode_manual if self.aggr_mode_manual is not None else auto_aggr
+        
+        if self.aggr_mode:
+            self.render_pilots_aggregated(visible)
+        else:
+            visible = [(n, p) for n, p in visible if not self._is_ignored(p)]
+            self.render_pilots_normal(visible)
+    
+    def render_pilots_normal(self, visible):
+        self._save_collapse_state()
+        if dpg.does_item_exist("aggr_content"):
+            dpg.delete_item("aggr_content")
+        if dpg.does_item_exist("pilot_list"):
+            dpg.delete_item("pilot_list")
+        
+        remaining = self.get_remaining_time()
+        if self.overlay.is_overlay_mode() and remaining <= 0:
+            self.timeout_expired = True
+        if self.timeout_expired and self.overlay.is_overlay_mode():
+            return
+        
+        with dpg.group(tag="pilot_list", parent="main"):
+            dpg.add_selectable(label=f"{len(visible)} | {remaining:.0f}s", user_data=("header", None))
+            dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
+            
+            for i, (name, pilot) in enumerate(visible):
+                row_h = dpg.get_text_size(name)[1]
+                tag_color = self.get_pilot_tag_color(pilot)
+                label = self.format_pilot(name, pilot)
+                rect_fill = tag_color or (0, 0, 0, 0)
+                
+                with dpg.group(horizontal=True):
+                    with dpg.drawlist(width=TAG_W, height=row_h):
+                        dpg.draw_rectangle([0, 0], [TAG_W, row_h], fill=rect_fill, color=rect_fill)
+                    dpg.add_spacer(width=4)
+                    link = pilot.stats_link
+                    dpg.add_selectable(label=label, user_data=("pilot", link) if link else None)
+                    dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(self.get_pilot_color(pilot), hover=True))
+
+    def render_pilots_aggregated(self, visible):
+        self._save_collapse_state()
+        if dpg.does_item_exist("pilot_list"):
+            dpg.delete_item("pilot_list")
+        if dpg.does_item_exist("aggr_content"):
+            dpg.delete_item("aggr_content")
+        
+        remaining = self.get_remaining_time()
+        if self.overlay.is_overlay_mode() and remaining <= 0:
+            self.timeout_expired = True
+        if self.timeout_expired and self.overlay.is_overlay_mode():
+            return
+        
+        alliance_cnt, corps_by_alliance, no_alliance_corps, grp_cnt = self._aggregate_pilots(visible)
+        total = len(visible)
+        
+        with dpg.group(tag="aggr_content", parent="main"):
+            dpg.add_selectable(label=f"{total} | {remaining:.0f}s", user_data=("header", None))
+            dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
+            
+            if any(grp_cnt.values()):
+                with dpg.group(horizontal=True):
+                    for grp_name, cnt in grp_cnt.items():
+                        if cnt > 0:
+                            color = self.group_cfg[grp_name]['color']
+                            dpg.add_text(f"{grp_name}: {cnt}  ")
+                            dpg.bind_item_theme(dpg.last_item(), self._text_theme(color))
+            
+            
+            sorted_alliances = sorted(alliance_cnt.items(), key=lambda x: (x[0] == "No Alliance", -x[1]))
+            alliance_labels = [f"  {'[No Alliance]' if a == 'No Alliance' else a}: {c}" for a, c in sorted_alliances]
+            max_w = max((dpg.get_text_size(lbl)[0] for lbl in alliance_labels), default=100) + 20
+            
+            with dpg.group(horizontal=True):
+                with dpg.group(width=max_w):
+                    dpg.add_text("Alliances:")
+                    dpg.bind_item_theme(dpg.last_item(), self._text_theme((255, 255, 0)))
+                    
+                    for alliance, cnt in sorted_alliances:
+                        display = "[No Alliance]" if alliance == "No Alliance" else alliance
+                        color = self.alliance_colors.get(alliance, DEFAULT_ALLIANCE_COLOR)
+                        alliance_id = self.alliance_ids.get(alliance)
+                        if alliance_id:
+                            dpg.add_selectable(label=f"  {display}: {cnt}", user_data=("alliance", alliance_id))
+                            dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(color, hover=True))
+                        else:
+                            dpg.add_text(f"  {display}: {cnt}")
+                            dpg.bind_item_theme(dpg.last_item(), self._text_theme(color))
+                
+                with dpg.group():
+                    is_open = self.collapse_state.get("corps", False)
+                    with dpg.collapsing_header(label="Corporations", default_open=is_open, tag="aggr_corp_header"):
+                        dpg.bind_item_theme(dpg.last_item(), self._header_theme())
+                        
+                        sorted_corps = sorted(corps_by_alliance.items(), key=lambda x: -alliance_cnt.get(x[0], 0))
+                        for j, (alliance, corps) in enumerate(sorted_corps):
+                            corps = sorted(corps, key=lambda x: -x["count"])
+                            display = "[No Alliance]" if alliance == "No Alliance" else alliance
+                            color = self.alliance_colors.get(alliance, DEFAULT_ALLIANCE_COLOR)
+                            alliance_open = self.collapse_state.get(alliance, False)
+                            alliance_total = alliance_cnt.get(alliance, 0)
+                            with dpg.collapsing_header(label=f"{display}: {alliance_total}", default_open=alliance_open, tag=f"aggr_alliance_corps_{j}", indent=10):
+                                dpg.bind_item_theme(dpg.last_item(), self._header_theme(color))
+                                for c in corps:
+                                    corp_id = self.corp_ids.get(c['name'])
+                                    if corp_id:
+                                        dpg.add_selectable(label=f"  {c['name']}: {c['count']}", user_data=("corp", corp_id))
+                                        dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(color, hover=True))
+                                    else:
+                                        dpg.add_text(f"  {c['name']}: {c['count']}")
+                                        dpg.bind_item_theme(dpg.last_item(), self._text_theme(color))
+                        
+                        for c in sorted(no_alliance_corps, key=lambda x: -x["count"]):
+                            corp_id = self.corp_ids.get(c['name'])
+                            if corp_id:
+                                dpg.add_selectable(label=f"  {c['name']}: {c['count']}", user_data=("corp", corp_id))
+                                dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(DEFAULT_ALLIANCE_COLOR, hover=True))
+                            else:
+                                dpg.add_text(f"  {c['name']}: {c['count']}")
+                                dpg.bind_item_theme(dpg.last_item(), self._text_theme(DEFAULT_ALLIANCE_COLOR))
+
+    def _aggregate_pilots(self, visible):
+        alliance_cnt = {}
+        corp_cnt = {}
+        pilot_alliances = {}
+        grp_cnt = {name: 0 for name in self.group_cfg}
+        
+        for name, pilot in visible:
+            alliance = pilot.alliance_name or "No Alliance"
+            corp = pilot.corp_name or "Unknown Corp"
+            
+            alliance_cnt[alliance] = alliance_cnt.get(alliance, 0) + 1
+            corp_cnt[corp] = corp_cnt.get(corp, 0) + 1
+            pilot_alliances[corp] = alliance
+            
+            if pilot.alliance_id and pilot.alliance_name:
+                self.alliance_ids[pilot.alliance_name] = pilot.alliance_id
+            if pilot.corp_id and pilot.corp_name:
+                self.corp_ids[pilot.corp_name] = pilot.corp_id
+            
+            if alliance not in self.alliance_colors and pilot.alliance_name:
+                if color := self.groups.get(pilot.alliance_name):
+                    self.alliance_colors[alliance] = color
+            
+            for grp_name, grp_data in self.group_cfg.items():
+                if (pilot.name in grp_data['entities'] or 
+                    pilot.corp_name in grp_data['entities'] or 
+                    pilot.alliance_name in grp_data['entities']):
+                    grp_cnt[grp_name] += 1
+                    break
+        
+        corps_by_alliance = {}
+        no_alliance_corps = []
+        
+        for corp, cnt in corp_cnt.items():
+            alliance = pilot_alliances.get(corp, "No Alliance")
+            corp_data = {"name": corp, "count": cnt}
+            if alliance and alliance != "No Alliance":
+                corps_by_alliance.setdefault(alliance, []).append(corp_data)
             else:
-                entry['text'] = f"{entry['name']} | Unknown"
-                entry['color'] = (128, 128, 128)
-                entry['kills'] = -2
+                no_alliance_corps.append(corp_data)
+        
+        return alliance_cnt, corps_by_alliance, no_alliance_corps, grp_cnt
 
-            display_data.append(entry)
-
-        display_data.sort(key=lambda x: x.get('kills', -2), reverse=True)
-
-        remaining = max(0, self.display_duration - self.get_elapsed_time())
-        header = f"{len(display_data)} | {remaining:.0f}s"
-
-        text_lines = [header] + [e['text'] for e in display_data]
-        full_text = '\n'.join(text_lines)
-
-        has_groups = any(e.get('group') for e in display_data)
-        x_offset = rect_w + 2 if has_groups else 0
-
-        max_w, total_h = utils.get_text_size_withnewline(full_text, (20, 20),
-                                                         font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        im = np.full((total_h + 40, max_w + 40 + x_offset, 3),
-                     C.dscan.transparency_color, np.uint8)
-
-        header_x = 10 + x_offset
-        header_y = 20
-        header_w, header_h = cv2.getTextSize(
-            header, cv2.FONT_HERSHEY_SIMPLEX, C.dscan.font_scale, int(C.dscan.font_thickness))[0]
-        self.header_rect = (header_x, header_y, header_w, header_h)
-        y = utils.draw_text_on_image(im, header, (header_x, header_y), color=(0, 255, 0),
-                                     bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
-
-        for entry in display_data:
-            text_size, _ = cv2.getTextSize(entry['text'], cv2.FONT_HERSHEY_SIMPLEX,
-                                           C.dscan.font_scale, int(C.dscan.font_thickness))
-            start_y = y
-            y = utils.draw_text_on_image(im, entry['text'], (10 + x_offset, y), color=entry['color'],
-                                         bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
-            if entry.get('group'):
-                cv2.rectangle(im, (4, start_y), (4 + rect_w, y - 2),
-                              entry['group']['color'], -1)
-            self.char_rects[entry['name']] = (
-                (10 + x_offset, start_y, text_size[0], y - start_y), entry['link'])
-
-        return im
-
-    def create_aggregated_display(self) -> Optional[np.ndarray]:
-        if not self.pilots:
-            return None
-
-        corp_counts, alliance_counts, group_counts = {}, {}, {
-            grp['name']: 0 for grp in self.groups}
-        corp_to_alliance = {}
-        for pilot in self.pilots.values():
-            corp = pilot.corp_name or 'Unknown'
-            corp_counts[corp] = corp_counts.get(corp, 0) + 1
-            if pilot.alliance_name:
-                alliance_counts[pilot.alliance_name] = alliance_counts.get(
-                    pilot.alliance_name, 0) + 1
-                corp_to_alliance[corp] = pilot.alliance_name
-            grp = self.get_pilot_group(pilot)
-            if grp:
-                group_counts[grp['name']] += 1
-
-        def get_entity_group(name):
-            if name in self.entity_to_group:
-                return self.entity_to_group[name]
-            alliance = corp_to_alliance.get(name)
-            return self.entity_to_group.get(alliance) if alliance else None
-
-        def sort_key(item):
-            name, cnt = item
-            grp = get_entity_group(name)
-            return (0, grp['order'], -cnt) if grp else (1, -cnt, name)
-
-        sorted_alliances = sorted(alliance_counts.items(), key=sort_key)
-        sorted_corps = sorted(corp_counts.items(), key=sort_key)
-
-        remaining = max(0, self.display_duration - self.get_elapsed_time())
-
-        total_pilots = len(self.pilots)
-        header_parts = [(f"{total_pilots} | {remaining:.0f}s", (0, 255, 0))]
-        for grp in self.groups:
-            cnt = group_counts.get(grp['name'], 0)
-            if cnt > 0:
-                header_parts.append((f" {grp['name']}:{cnt}", grp['color']))
-
-        left_lines_data = [("Alliances:", (255, 255, 255))]
-        for a, c in sorted_alliances:
-            grp = self.entity_to_group.get(a)
-            color = grp['color'] if grp else (255, 255, 255)
-            left_lines_data.append((f"  {a}: {c}", color))
-        if not sorted_alliances:
-            left_lines_data.append(("  None", (128, 128, 128)))
-
-        right_lines_data = [("Corporations:", (255, 255, 255))]
-        for c, n in sorted_corps:
-            grp = get_entity_group(c)
-            color = grp['color'] if grp else (255, 255, 255)
-            right_lines_data.append((f"  {c}: {n}", color))
-
-        header_text = ''.join(p[0] for p in header_parts)
-        left_text = '\n'.join(d[0] for d in left_lines_data)
-        right_text = '\n'.join(d[0] for d in right_lines_data)
-
-        header_w, header_h = utils.get_text_size_withnewline(header_text, (20, 20),
-                                                             font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        left_w, left_h = utils.get_text_size_withnewline(left_text, (20, 20),
-                                                         font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        right_w, right_h = utils.get_text_size_withnewline(right_text, (20, 20),
-                                                           font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-
-        content_w = left_w + right_w + 30
-        total_w = max(header_w + 20, content_w)
-        total_h = header_h + max(left_h, right_h) + 40
-        im = np.full((total_h, total_w, 3),
-                     C.dscan.transparency_color, np.uint8)
-
-        self.header_rect = (10, 20, header_w, header_h)
-        x = 10
-        for text, color in header_parts:
-            text_w, _ = cv2.getTextSize(
-                text, cv2.FONT_HERSHEY_SIMPLEX, C.dscan.font_scale, int(C.dscan.font_thickness))[0]
-            utils.draw_text_on_image(im, text, (x, 20), color=color,
-                                     bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-            x += text_w
-
-        y = 20 + header_h
-        for text, color in left_lines_data:
-            y = utils.draw_text_on_image(im, text, (10, y), color=color,
-                                         bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
-
-        y = 20 + header_h
-        for text, color in right_lines_data:
-            y = utils.draw_text_on_image(im, text, (left_w + 20, y), color=color,
-                                         bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
-
-        return im
-
-    def create_dscan_display(self) -> Optional[np.ndarray]:
-        if not self.dscan_service.last_result:
-            return None
-
-        ship_diffs = self.dscan_service.get_ship_diffs()
-        group_totals = self.dscan_service.get_group_totals()
-        group_diffs = self.dscan_service.get_group_diffs()
-        total = self.dscan_service.last_result.total_ships
-
+    def render_dscan(self):
+        res = self.dscan_svc.last_result
+        if not res:
+            return
+        
+        self._save_collapse_state()
+        if dpg.does_item_exist("pilot_list"):
+            dpg.delete_item("pilot_list")
+        if dpg.does_item_exist("aggr_content"):
+            dpg.delete_item("aggr_content")
+        if dpg.does_item_exist("dscan_content"):
+            dpg.delete_item("dscan_content")
+        
+        remaining = self.get_remaining_time()
+        if self.overlay.is_overlay_mode() and remaining <= 0:
+            self.timeout_expired = True
+        if self.timeout_expired and self.overlay.is_overlay_mode():
+            return
+        
+        ship_diffs = self.dscan_svc.get_ship_diffs()
+        grp_totals = self.dscan_svc.get_group_totals()
+        grp_diffs = self.dscan_svc.get_group_diffs()
+        
         ship_list = []
-        for grp, ships in self.dscan_service.last_result.ship_counts.items():
+        for grp, ships in res.ship_counts.items():
             for ship, cnt in ships.items():
-                ship_list.append((ship, cnt, ship_diffs.get(ship, 0)))
-
-        # Add ships that disappeared
-        if self.dscan_service.previous_result:
-            cur_ships = {s for ships in self.dscan_service.last_result.ship_counts.values()
-                         for s in ships}
-            for grp, ships in self.dscan_service.previous_result.ship_counts.items():
+                ship_list.append((ship, cnt, ship_diffs.get(ship, 0), grp))
+        
+        if self.dscan_svc.previous_result:
+            cur_ships = {s for ships in res.ship_counts.values() for s in ships}
+            for grp, ships in self.dscan_svc.previous_result.ship_counts.items():
                 for ship, prev_cnt in ships.items():
                     if ship not in cur_ships:
-                        ship_list.append((ship, 0, -prev_cnt))
-
-        # Add groups that disappeared
-        if self.dscan_service.previous_result:
-            for grp in self.dscan_service.previous_result.ship_counts:
-                if grp not in group_totals:
-                    group_totals[grp] = 0
-
+                        ship_list.append((ship, 0, -prev_cnt, grp))
+            for grp in self.dscan_svc.previous_result.ship_counts:
+                if grp not in grp_totals:
+                    grp_totals[grp] = 0
+        
         ship_list.sort(key=lambda x: (x[1] == 0, -x[1]))
-        sorted_groups = sorted(group_totals.items(),
-                               key=lambda x: x[1], reverse=True)
+        sorted_grps = sorted(grp_totals.items(), key=lambda x: -x[1])
+        
+        ships_by_grp = {}
+        for ship, cnt, diff, grp in ship_list:
+            ships_by_grp.setdefault(grp, []).append((ship, cnt, diff))
+        
+        def diff_color(d):
+            return DIFF_POSITIVE_COLOR if d > 0 else DIFF_NEGATIVE_COLOR if d < 0 else DIFF_NEUTRAL_COLOR
+        
+        def diff_str(d):
+            return f" (+{d})" if d > 0 else f" ({d})" if d < 0 else ""
+        
+        with dpg.group(tag="dscan_content", parent="main"):
+            dpg.add_selectable(label=f"{res.total_ships} | {remaining:.0f}s", user_data=("header", None))
+            dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
+            
+            with dpg.group(horizontal=True):
+                with dpg.group(width=200):
+                    dpg.add_spacer(height=dpg.get_text_size("X")[1])
+                    for ship, cnt, diff, _ in ship_list[:30]:
+                        dpg.add_text(f"  {ship}: {cnt}{diff_str(diff)}")
+                        dpg.bind_item_theme(dpg.last_item(), self._text_theme(diff_color(diff)))
+                
+                with dpg.group():
+                    is_open = self.collapse_state.get("dscan_groups", {}).get("main", True)
+                    with dpg.collapsing_header(label="Categories", default_open=is_open, tag="dscan_groups_header"):
+                        dpg.bind_item_theme(dpg.last_item(), self._header_theme())
+                        
+                        for j, (grp, cnt) in enumerate(sorted_grps):
+                            grp_diff = grp_diffs.get(grp, 0)
+                            color = diff_color(grp_diff)
+                            grp_open = self.collapse_state.get("dscan_groups", {}).get(grp, False)
+                            with dpg.collapsing_header(label=f"{grp}: {cnt}{diff_str(grp_diff)}", default_open=grp_open, tag=f"dscan_grp_{j}", indent=10):
+                                dpg.bind_item_theme(dpg.last_item(), self._header_theme(color))
+                                for ship, ship_cnt, ship_diff in ships_by_grp.get(grp, []):
+                                    dpg.add_text(f"  {ship}: {ship_cnt}{diff_str(ship_diff)}")
+                                    dpg.bind_item_theme(dpg.last_item(), self._text_theme(diff_color(ship_diff)))
 
-        remaining = max(0, self.display_duration - self.get_elapsed_time())
-        header = f"{total} | {remaining:.0f}s"
-
-        left_lines = [header]
-        for ship, cnt, diff in ship_list:
-            diff_str = f" (+{diff})" if diff > 0 else f" ({diff})" if diff < 0 else ""
-            left_lines.append(f"{ship}: {cnt}{diff_str}")
-
-        right_data = []
-        for grp, cnt in sorted_groups:
-            grp_diff = group_diffs.get(grp, 0)
-            diff_str = f" (+{grp_diff})" if grp_diff > 0 else f" ({grp_diff})" if grp_diff < 0 else ""
-            right_data.append((grp, cnt, grp_diff, f"{grp}: {cnt}{diff_str}"))
-
-        left_text = '\n'.join(left_lines)
-        right_text = '\n'.join(["Categories:"] + [d[3] for d in right_data])
-        left_w, left_h = utils.get_text_size_withnewline(left_text, (20, 20),
-                                                         font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-        right_w, right_h = utils.get_text_size_withnewline(right_text, (20, 20),
-                                                           font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)
-
-        total_w, total_h = left_w + right_w + 30, max(left_h, right_h) + 40
-        im = np.full((total_h, total_w, 3),
-                     C.dscan.transparency_color, np.uint8)
-
-        header_w, header_h = cv2.getTextSize(
-            header, cv2.FONT_HERSHEY_SIMPLEX, C.dscan.font_scale, int(C.dscan.font_thickness))[0]
-        self.header_rect = (10, 20, header_w, header_h)
-
-        y = 20
-        for i, line in enumerate(left_lines):
-            if i < 1:
-                color = (255, 255, 255)
-            elif i - 1 < len(ship_list):
-                _, _, diff = ship_list[i - 1]
-                color = (0, 255, 0) if diff > 0 else (
-                    0, 0, 255) if diff < 0 else (255, 255, 255)
-            else:
-                color = (255, 255, 255)
-            y = utils.draw_text_on_image(im, line, (10, y), color=color,
-                                         bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
-
-        right_x, right_y = left_w + 20, 20
-        right_y = utils.draw_text_on_image(im, "Categories:", (right_x, right_y), color=(255, 255, 255),
-                                           bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
-        for grp, cnt, grp_diff, text in right_data:
-            color = (0, 255, 0) if grp_diff > 0 else (
-                0, 0, 255) if grp_diff < 0 else (255, 255, 255)
-            right_y = utils.draw_text_on_image(im, text, (right_x, right_y), color=color,
-                                               bg_color=self.bg_color, font_scale=C.dscan.font_scale, font_thickness=C.dscan.font_thickness)[3]
-
-        return im
-
-    def get_clipboard_data(self) -> Optional[str]:
+    def check_clipboard(self):
         try:
-            return pyperclip.paste()
-        except Exception as e:
-            logger.info(f"Clipboard error: {e}")
-            return None
-
+            clip = pyperclip.paste()
+        except:
+            return
+        
+        if not clip or clip == self.last_clip:
+            return
+        
+        self.last_clip = clip
+        
+        if self.dscan_svc.is_dscan_format(clip) and self.dscan_svc.is_valid_dscan(clip) and self.dscan_svc.parse(clip, self.diff_timeout):
+            self.set_mode('dscan')
+        elif self.pilot_svc.set_pilots(clip):
+            self.set_mode('pilots')
+    
+    def set_mode(self, new_mode):
+        if self.mode != new_mode:
+            self.clear_display()
+        self.mode = new_mode
+        self.reset_timeout()
+    
+    def clear_display(self):
+        for tag in ("pilot_list", "aggr_content", "dscan_content"):
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+    
+    def reset_timeout(self):
+        self.result_start_time = time.time()
+        self.paused_time = 0
+        self.pause_start_time = None
+        self.timeout_expired = False
+        if not self.overlay.is_overlay_mode():
+            self.pause_start_time = time.time()
+    
+    def run_loop(self):
+        while dpg.is_dearpygui_running():
+            self.overlay.process_hotkey()
+            self.process_aggr_hotkey()
+            self.win_mgr.check_and_save()
+            self.check_clipboard()
+            
+            if self.mode == 'pilots':
+                self.render_pilots()
+            elif self.mode == 'dscan':
+                self.render_dscan()
+            
+            dpg.render_dearpygui_frame()
+    
     def start(self):
-        logger.info("Press Ctrl+C to exit")
-        last_clipboard = ""
-
-        try:
-            while True:
-                cur_clipboard = self.get_clipboard_data()
-                if cur_clipboard and cur_clipboard != last_clipboard:
-                    utils.tick()
-                    self.parse_clipboard(cur_clipboard)
-                    self.last_result_total_time = utils.tock()
-                    self.last_clipboard = cur_clipboard
-                    last_clipboard = cur_clipboard
-
-                if self.result_start_time and self.transparency_on:
-                    if self.get_elapsed_time() >= self.display_duration:
-                        self.show_status("")
-                        self.result_start_time = None
-                        self.last_result_im = None
-                        self.pilots = {}
-                        self.dscan_service.reset()
-                        self.is_local = False
-                        self.is_dscan = False
-
-                im = None
-                if self.result_start_time:
-                    if self.is_local:
-                        im = self.create_aggregated_display(
-                        ) if self.aggregated_mode else self.create_pilot_display()
-                    elif self.is_dscan:
-                        im = self.create_dscan_display()
-
-                if im is not None:
-                    disp_im = self.apply_hover_highlight(im)
-                    cv2.imshow(self.win_name, disp_im)
-                self.last_result_im = im
-                cv2.waitKey(100)
-                self.handle_transparency()
-
-        except KeyboardInterrupt:
-            logger.info("Exiting...")
-            cv2.destroyAllWindows()
-
+        self.setup_gui()
+        self.run_loop()
+        self.overlay.cleanup()
+        dpg.destroy_context()
 
 def main():
-    analyzer = DScanAnalyzer()
-    analyzer.start()
-
+    DScanAnalyzer().start()
 
 if __name__ == "__main__":
     main()
