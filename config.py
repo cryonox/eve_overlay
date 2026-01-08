@@ -2,7 +2,6 @@ import yaml
 from pathlib import Path
 import sys
 import threading
-from rich import print
 from loguru import logger
 
 _write_lock = threading.Lock()
