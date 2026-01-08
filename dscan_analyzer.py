@@ -46,8 +46,18 @@ class DScanAnalyzer:
             dscan_cfg.get('aggregated_mode_threshold', 50)
         )
         self.dscan_svc = DScanService()
-        self.mgr = OverlayManager(WIN_TITLE, C, win_key='dscan_winstate', ui_key='dscan_uistate',
-                                   on_toggle=self.on_overlay_toggle)
+        
+        bg_color_cfg = dscan_cfg.get('bg_color', None)
+        bg_color = tuple(bg_color_cfg) if bg_color_cfg else None
+        
+        self.mgr = OverlayManager(
+            WIN_TITLE, C, win_key='dscan_winstate', ui_key='dscan_uistate',
+            bg_color=bg_color,
+            hotkey_overlay=dscan_cfg.get('hotkey_overlay'),
+            hotkey_clickthrough=dscan_cfg.get('hotkey_clickthrough'),
+            hotkey_transparent=dscan_cfg.get('hotkey_transparent'),
+            on_toggle=self.on_overlay_toggle
+        )
         self.last_clip = ""
         self.mode = None
         self.themes = {}
@@ -84,13 +94,13 @@ class DScanAnalyzer:
         self.aggr_threshold = dscan_cfg.get('aggregated_mode_threshold', 50)
         self.aggr_hotkey = dscan_cfg.get('hotkey_mode', 'alt+shift+m')
         self.aggr_toggle_requested = False
-        self.collapse_state = {"corps": False, "dscan_groups": {}}
+        self.collapse_state = {"corps": False, "dscan_groups": {"main": True}}
         self.alliance_colors = {}
         self.alliance_ids = {}
         self.corp_ids = {}
     
-    def on_overlay_toggle(self, enabled):
-        if enabled:
+    def on_overlay_toggle(self):
+        if self.mgr.overlay:
             if self.pause_start_time:
                 self.paused_time += time.time() - self.pause_start_time
                 self.pause_start_time = None
@@ -99,6 +109,10 @@ class DScanAnalyzer:
                 self.pause_start_time = time.time()
             self.timeout_expired = False
         self._update_zoom_slider_visibility()
+        self.themes.clear()
+    
+    def _update_bg_color(self):
+        dpg.set_viewport_clear_color(self.mgr.colorkey_rgba)
 
     def _load_ui_scale(self):
         state = C.get('dscan_uistate', {})
@@ -114,7 +128,8 @@ class DScanAnalyzer:
         if dpg.does_item_exist("font_registry"):
             return
         with dpg.font_registry(tag="font_registry"):
-            self.font = dpg.add_font(C.dscan.font, self.base_font_size)
+            with dpg.font(C.dscan.font, self.base_font_size) as self.font:
+                dpg.add_font_range(0x25A0, 0x25C0)
         dpg.bind_font(self.font)
     
     def _create_zoom_slider(self):
@@ -135,6 +150,27 @@ class DScanAnalyzer:
         dpg.set_global_font_scale(val)
         self.slider_h = None
         self._save_ui_scale()
+        self._auto_resize()
+    
+    def _auto_resize(self, force=False):
+        content_tag = None
+        for tag in ("pilot_list", "aggr_content", "dscan_content"):
+            if dpg.does_item_exist(tag):
+                content_tag = tag
+                break
+        if not content_tag:
+            return
+        
+        size = dpg.get_item_rect_size(content_tag)
+        if not size or size[0] <= 0:
+            return
+        w = int(size[0]) + 50
+        
+        if w <= 0:
+            return
+        cur_w = dpg.get_viewport_width()
+        if cur_w != w:
+            dpg.set_viewport_width(w)
     
     def _update_zoom_slider_visibility(self):
         if not dpg.does_item_exist("zoom_container"):
@@ -224,18 +260,17 @@ class DScanAnalyzer:
                 continue
             action, data = user_data
             if action == "pilot":
-                dpg.set_value(tag, False)
                 webbrowser.open(data)
             elif action == "header":
-                dpg.set_value(tag, False)
                 if url := get_dscan_info_url(self.last_clip):
                     webbrowser.open(url)
             elif action == "alliance":
-                dpg.set_value(tag, False)
                 webbrowser.open(f"https://zkillboard.com/alliance/{data}/")
             elif action == "corp":
-                dpg.set_value(tag, False)
                 webbrowser.open(f"https://zkillboard.com/corporation/{data}/")
+            elif action == "toggle":
+                cur = self._get_collapse_state(data)
+                self._set_collapse_state(data, not cur)
             break
 
     def _setup_aggr_hotkey(self):
@@ -261,27 +296,79 @@ class DScanAnalyzer:
             self.themes[key] = theme
         return self.themes[key]
     
-    def _text_theme(self, color):
-        return self._get_theme(color, dpg.mvText, [(dpg.mvThemeCol_Text, color)])
+    def _btn_theme(self, color):
+        bg = self.mgr.bg_color if self.mgr.text_bg else self.mgr.colorkey
+        hover_bg = (80, 80, 80, 255) if self.mgr.text_bg else (60, 60, 60, 255)
+        key = f"btn_{color}_{bg}"
+        if key not in self.themes:
+            with dpg.theme() as theme:
+                with dpg.theme_component(dpg.mvButton):
+                    dpg.add_theme_color(dpg.mvThemeCol_Text, color)
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, bg)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, hover_bg)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, hover_bg)
+                    dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 0, 0)
+                    dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 0)
+                    dpg.add_theme_style(dpg.mvStyleVar_ButtonTextAlign, 0, 0.5)
+            self.themes[key] = theme
+        return self.themes[key]
     
-    def _selectable_theme(self, color, hover=False):
-        key = f"sel_{color}_{hover}"
-        bg = tuple(self.mgr.colorkey)
-        hover_bg = (80, 80, 80, 150) if hover else bg
-        return self._get_theme(key, dpg.mvSelectable, [
-            (dpg.mvThemeCol_Text, color),
-            (dpg.mvThemeCol_Header, bg),
-            (dpg.mvThemeCol_HeaderHovered, hover_bg),
-            (dpg.mvThemeCol_HeaderActive, hover_bg),
-        ])
+    def _header_theme(self, color=None, is_open=False):
+        bg = self.mgr.bg_color if self.mgr.text_bg else self.mgr.colorkey
+        hover_bg = (80, 80, 80, 255) if self.mgr.text_bg else (60, 60, 60, 255)
+        key = f"hdr_{color}_{bg}_{is_open}"
+        if key not in self.themes:
+            with dpg.theme() as theme:
+                with dpg.theme_component(dpg.mvButton):
+                    if color:
+                        dpg.add_theme_color(dpg.mvThemeCol_Text, color)
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, bg)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, hover_bg)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, hover_bg)
+                    dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 0, 0)
+                    dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 0)
+                    dpg.add_theme_style(dpg.mvStyleVar_ButtonTextAlign, 0, 0.5)
+            self.themes[key] = theme
+        return self.themes[key]
+
+    def add_item(self, label, color, user_data=None, parent=None):
+        if parent:
+            dpg.add_button(label=label, user_data=user_data, parent=parent)
+        else:
+            dpg.add_button(label=label, user_data=user_data)
+        dpg.bind_item_theme(dpg.last_item(), self._btn_theme(color))
     
-    def _header_theme(self, color=None):
-        key = f"hdr_{color}"
-        bg = tuple(self.mgr.colorkey)
-        colors = [(dpg.mvThemeCol_Header, bg), (dpg.mvThemeCol_HeaderHovered, bg), (dpg.mvThemeCol_HeaderActive, bg)]
-        if color:
-            colors.insert(0, (dpg.mvThemeCol_Text, color))
-        return self._get_theme(key, dpg.mvCollapsingHeader, colors)
+    def add_header(self, label, state_key, color=None, indent=0, parent=None):
+        is_open = self._get_collapse_state(state_key)
+        arrow = "\u25BC " if is_open else "\u25BA "
+        prefix = " " * indent
+        btn_label = f"{prefix}{arrow}{label}"
+        user_data = ("toggle", state_key)
+        if parent:
+            dpg.add_button(label=btn_label, user_data=user_data, parent=parent)
+        else:
+            dpg.add_button(label=btn_label, user_data=user_data)
+        dpg.bind_item_theme(dpg.last_item(), self._header_theme(color, is_open))
+        return is_open
+    
+    def _get_collapse_state(self, key):
+        if isinstance(key, tuple):
+            d = self.collapse_state
+            for k in key[:-1]:
+                d = d.get(k, {})
+            return d.get(key[-1], False)
+        return self.collapse_state.get(key, False)
+    
+    def _set_collapse_state(self, key, val):
+        if isinstance(key, tuple):
+            d = self.collapse_state
+            for k in key[:-1]:
+                if k not in d:
+                    d[k] = {}
+                d = d[k]
+            d[key[-1]] = val
+        else:
+            self.collapse_state[key] = val
 
     def get_pilot_tag_color(self, pilot):
         return next(
@@ -312,29 +399,6 @@ class DScanAnalyzer:
                 pilot.corp_name in self.ignore_list or 
                 pilot.alliance_name in self.ignore_list)
     
-    def _save_collapse_state(self):
-        if dpg.does_item_exist("aggr_corp_header"):
-            self.collapse_state["corps"] = dpg.get_value("aggr_corp_header")
-        for i in range(100):
-            tag = f"aggr_alliance_corps_{i}"
-            if dpg.does_item_exist(tag):
-                label = dpg.get_item_label(tag)
-                alliance = label.rsplit(":", 1)[0] if ":" in label else label
-                self.collapse_state[alliance] = dpg.get_value(tag)
-        if dpg.does_item_exist("dscan_groups_header"):
-            if "dscan_groups" not in self.collapse_state:
-                self.collapse_state["dscan_groups"] = {}
-            self.collapse_state["dscan_groups"]["main"] = dpg.get_value("dscan_groups_header")
-        for j in range(50):
-            tag = f"dscan_grp_{j}"
-            if dpg.does_item_exist(tag):
-                label = dpg.get_item_label(tag)
-                grp = label.rsplit(":", 1)[0].strip() if ":" in label else label
-                grp = grp.split("(")[0].strip() if "(" in grp else grp
-                if "dscan_groups" not in self.collapse_state:
-                    self.collapse_state["dscan_groups"] = {}
-                self.collapse_state["dscan_groups"][grp] = dpg.get_value(tag)
-
     def render_pilots(self):
         if dpg.does_item_exist("dscan_content"):
             dpg.delete_item("dscan_content")
@@ -354,7 +418,6 @@ class DScanAnalyzer:
             self.render_pilots_normal(visible)
     
     def render_pilots_normal(self, visible):
-        self._save_collapse_state()
         if dpg.does_item_exist("aggr_content"):
             dpg.delete_item("aggr_content")
         if dpg.does_item_exist("pilot_list"):
@@ -368,8 +431,7 @@ class DScanAnalyzer:
         
         with dpg.group(tag="pilot_list", parent="main"):
             lbl = f"{len(visible)} | {remaining:.0f}s"
-            dpg.add_selectable(label=lbl, width=dpg.get_text_size(lbl)[0] + 10, user_data=("header", None))
-            dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
+            self.add_item(lbl, (0, 255, 0), ("header", None))
             
             for i, (name, pilot) in enumerate(visible):
                 row_h = dpg.get_text_size(name)[1]
@@ -382,11 +444,9 @@ class DScanAnalyzer:
                         dpg.draw_rectangle([0, 0], [TAG_W, row_h], fill=rect_fill, color=rect_fill)
                     dpg.add_spacer(width=4)
                     link = pilot.stats_link
-                    dpg.add_selectable(label=label, width=dpg.get_text_size(label)[0] + 10, user_data=("pilot", link) if link else None)
-                    dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(self.get_pilot_color(pilot), hover=True))
+                    self.add_item(label, self.get_pilot_color(pilot), ("pilot", link) if link else None)
 
     def render_pilots_aggregated(self, visible):
-        self._save_collapse_state()
         if dpg.does_item_exist("pilot_list"):
             dpg.delete_item("pilot_list")
         if dpg.does_item_exist("aggr_content"):
@@ -401,71 +461,45 @@ class DScanAnalyzer:
         alliance_cnt, corps_by_alliance, no_alliance_corps, grp_cnt = self._aggregate_pilots(visible)
         total = len(visible)
         
+        sorted_alliances = sorted(alliance_cnt.items(), key=lambda x: (x[0] == "No Alliance", -x[1]))
+        
         with dpg.group(tag="aggr_content", parent="main"):
             lbl = f"{total} | {remaining:.0f}s"
-            dpg.add_selectable(label=lbl, width=dpg.get_text_size(lbl)[0] + 10, user_data=("header", None))
-            dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
+            self.add_item(lbl, (0, 255, 0), ("header", None))
             
             if any(grp_cnt.values()):
                 with dpg.group(horizontal=True):
                     for grp_name, cnt in grp_cnt.items():
                         if cnt > 0:
                             color = self.group_cfg[grp_name]['color']
-                            dpg.add_text(f"{grp_name}: {cnt}  ")
-                            dpg.bind_item_theme(dpg.last_item(), self._text_theme(color))
-            
-            
-            sorted_alliances = sorted(alliance_cnt.items(), key=lambda x: (x[0] == "No Alliance", -x[1]))
-            alliance_labels = [f"  {'[No Alliance]' if a == 'No Alliance' else a}: {c}" for a, c in sorted_alliances]
-            max_w = max((dpg.get_text_size(lbl)[0] for lbl in alliance_labels), default=100) + 20
+                            self.add_item(f"{grp_name}: {cnt}  ", color)
             
             with dpg.group(horizontal=True):
-                with dpg.group(width=max_w):
-                    dpg.add_text("Alliances:")
-                    dpg.bind_item_theme(dpg.last_item(), self._text_theme((255, 255, 0)))
+                with dpg.group():
+                    self.add_item("Alliances:", (255, 255, 0))
                     
                     for alliance, cnt in sorted_alliances:
                         display = "[No Alliance]" if alliance == "No Alliance" else alliance
                         color = self.alliance_colors.get(alliance, DEFAULT_ALLIANCE_COLOR)
                         alliance_id = self.alliance_ids.get(alliance)
-                        if alliance_id:
-                            dpg.add_selectable(label=f"  {display}: {cnt}", user_data=("alliance", alliance_id))
-                            dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(color, hover=True))
-                        else:
-                            dpg.add_text(f"  {display}: {cnt}")
-                            dpg.bind_item_theme(dpg.last_item(), self._text_theme(color))
+                        self.add_item(f"  {display}: {cnt}", color, ("alliance", alliance_id) if alliance_id else None)
                 
                 with dpg.group():
-                    is_open = self.collapse_state.get("corps", False)
-                    with dpg.collapsing_header(label="Corporations", default_open=is_open, tag="aggr_corp_header"):
-                        dpg.bind_item_theme(dpg.last_item(), self._header_theme())
-                        
+                    if self.add_header("Corporations", "corps"):
                         sorted_corps = sorted(corps_by_alliance.items(), key=lambda x: -alliance_cnt.get(x[0], 0))
                         for j, (alliance, corps) in enumerate(sorted_corps):
                             corps = sorted(corps, key=lambda x: -x["count"])
                             display = "[No Alliance]" if alliance == "No Alliance" else alliance
                             color = self.alliance_colors.get(alliance, DEFAULT_ALLIANCE_COLOR)
-                            alliance_open = self.collapse_state.get(alliance, False)
                             alliance_total = alliance_cnt.get(alliance, 0)
-                            with dpg.collapsing_header(label=f"{display}: {alliance_total}", default_open=alliance_open, tag=f"aggr_alliance_corps_{j}", indent=10):
-                                dpg.bind_item_theme(dpg.last_item(), self._header_theme(color))
+                            if self.add_header(f"{display}: {alliance_total}", alliance, color, indent=2):
                                 for c in corps:
                                     corp_id = self.corp_ids.get(c['name'])
-                                    if corp_id:
-                                        dpg.add_selectable(label=f"  {c['name']}: {c['count']}", user_data=("corp", corp_id))
-                                        dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(color, hover=True))
-                                    else:
-                                        dpg.add_text(f"  {c['name']}: {c['count']}")
-                                        dpg.bind_item_theme(dpg.last_item(), self._text_theme(color))
+                                    self.add_item(f"    {c['name']}: {c['count']}", color, ("corp", corp_id) if corp_id else None)
                         
                         for c in sorted(no_alliance_corps, key=lambda x: -x["count"]):
                             corp_id = self.corp_ids.get(c['name'])
-                            if corp_id:
-                                dpg.add_selectable(label=f"  {c['name']}: {c['count']}", user_data=("corp", corp_id))
-                                dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(DEFAULT_ALLIANCE_COLOR, hover=True))
-                            else:
-                                dpg.add_text(f"  {c['name']}: {c['count']}")
-                                dpg.bind_item_theme(dpg.last_item(), self._text_theme(DEFAULT_ALLIANCE_COLOR))
+                            self.add_item(f"  {c['name']}: {c['count']}", DEFAULT_ALLIANCE_COLOR, ("corp", corp_id) if corp_id else None)
 
     def _aggregate_pilots(self, visible):
         alliance_cnt = {}
@@ -515,7 +549,6 @@ class DScanAnalyzer:
         if not res:
             return
         
-        self._save_collapse_state()
         if dpg.does_item_exist("pilot_list"):
             dpg.delete_item("pilot_list")
         if dpg.does_item_exist("aggr_content"):
@@ -563,30 +596,22 @@ class DScanAnalyzer:
         
         with dpg.group(tag="dscan_content", parent="main"):
             lbl = f"{res.total_ships} | {remaining:.0f}s"
-            dpg.add_selectable(label=lbl, width=dpg.get_text_size(lbl)[0] + 10, user_data=("header", None))
-            dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
+            self.add_item(lbl, (0, 255, 0), ("header", None))
             
             with dpg.group(horizontal=True):
-                with dpg.group(width=200):
+                with dpg.group():
                     dpg.add_spacer(height=dpg.get_text_size("X")[1])
                     for ship, cnt, diff, _ in ship_list[:30]:
-                        dpg.add_text(f"  {ship}: {cnt}{diff_str(diff)}")
-                        dpg.bind_item_theme(dpg.last_item(), self._text_theme(diff_color(diff)))
+                        self.add_item(f"  {ship}: {cnt}{diff_str(diff)}", diff_color(diff))
                 
                 with dpg.group():
-                    is_open = self.collapse_state.get("dscan_groups", {}).get("main", True)
-                    with dpg.collapsing_header(label="Categories", default_open=is_open, tag="dscan_groups_header"):
-                        dpg.bind_item_theme(dpg.last_item(), self._header_theme())
-                        
+                    if self.add_header("Categories", ("dscan_groups", "main")):
                         for j, (grp, cnt) in enumerate(sorted_grps):
                             grp_diff = grp_diffs.get(grp, 0)
                             color = diff_color(grp_diff)
-                            grp_open = self.collapse_state.get("dscan_groups", {}).get(grp, False)
-                            with dpg.collapsing_header(label=f"{grp}: {cnt}{diff_str(grp_diff)}", default_open=grp_open, tag=f"dscan_grp_{j}", indent=10):
-                                dpg.bind_item_theme(dpg.last_item(), self._header_theme(color))
+                            if self.add_header(f"{grp}: {cnt}{diff_str(grp_diff)}", ("dscan_groups", grp), color, indent=2):
                                 for ship, ship_cnt, ship_diff in ships_by_grp.get(grp, []):
-                                    dpg.add_text(f"  {ship}: {ship_cnt}{diff_str(ship_diff)}")
-                                    dpg.bind_item_theme(dpg.last_item(), self._text_theme(diff_color(ship_diff)))
+                                    self.add_item(f"    {ship}: {ship_cnt}{diff_str(ship_diff)}", diff_color(ship_diff))
 
     def check_clipboard(self):
         try:
@@ -609,6 +634,7 @@ class DScanAnalyzer:
             self.clear_display()
         self.mode = new_mode
         self.reset_timeout()
+        self._needs_resize = True
     
     def clear_display(self):
         for tag in ("pilot_list", "aggr_content", "dscan_content"):
@@ -624,8 +650,9 @@ class DScanAnalyzer:
             self.pause_start_time = time.time()
     
     def run_loop(self):
+        self._needs_resize = False
         while dpg.is_dearpygui_running():
-            self.mgr.process_hotkey()
+            self.mgr.process_hotkeys()
             self.process_aggr_hotkey()
             self.mgr.check_and_save()
             self.check_clipboard()
@@ -636,6 +663,12 @@ class DScanAnalyzer:
                 self.render_dscan()
             
             dpg.render_dearpygui_frame()
+            
+            if self._needs_resize:
+                self._auto_resize(force=True)
+                self._needs_resize = False
+            else:
+                self._auto_resize()
     
     def start(self):
         self.setup_gui()

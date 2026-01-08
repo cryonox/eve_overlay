@@ -1,8 +1,11 @@
 import yaml
 from pathlib import Path
 import sys
+import threading
 from rich import print
 from loguru import logger
+
+_write_lock = threading.Lock()
 
 
 class AttrDict(dict):
@@ -36,28 +39,29 @@ class AttrDict(dict):
         base_path = get_base_path()
         fpath = base_path / filepath
         
-        existing = {}
-        if fpath.exists():
-            with open(fpath, 'r') as f:
-                existing = yaml.safe_load(f) or {}
-        
-        def set_nested(obj, key_path, val):
-            parts = key_path.split('.')
-            for p in parts[:-1]:
-                obj = obj.setdefault(p, {})
-            obj[parts[-1]] = val
-        
-        for key in keys:
-            val = self._get_nested(key)
-            if val is not None:
-                set_nested(existing, key, self._to_dict(val))
-        
-        def represent_list(dumper, data):
-            return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
-        
-        yaml.add_representer(list, represent_list)
-        with open(fpath, 'w') as f:
-            yaml.dump(existing, f, default_flow_style=False, indent=2)
+        with _write_lock:
+            existing = {}
+            if fpath.exists():
+                with open(fpath, 'r') as f:
+                    existing = yaml.safe_load(f) or {}
+            
+            def set_nested(obj, key_path, val):
+                parts = key_path.split('.')
+                for p in parts[:-1]:
+                    obj = obj.setdefault(p, {})
+                obj[parts[-1]] = val
+            
+            for key in keys:
+                val = self._get_nested(key)
+                if val is not None:
+                    set_nested(existing, key, self._to_dict(val))
+            
+            def represent_list(dumper, data):
+                return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
+            
+            yaml.add_representer(list, represent_list)
+            with open(fpath, 'w') as f:
+                yaml.dump(existing, f, default_flow_style=False, indent=2)
 
 
 def dict2attrdict(dictionary):
@@ -179,22 +183,23 @@ def write(keys, filepath):
     base_path = get_base_path()
     fpath = base_path / filepath
     
-    existing = {}
-    if fpath.exists():
-        with open(fpath, 'r') as f:
-            existing = yaml.safe_load(f) or {}
-    
-    for key in keys:
-        val = get_nested(C, key)
-        if val is not None:
-            set_nested(existing, key, attrdict2dict(val))
-    
-    def represent_list(dumper, data):
-        return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
-    
-    yaml.add_representer(list, represent_list)
-    with open(fpath, 'w') as f:
-        yaml.dump(existing, f, default_flow_style=False, indent=2)
+    with _write_lock:
+        existing = {}
+        if fpath.exists():
+            with open(fpath, 'r') as f:
+                existing = yaml.safe_load(f) or {}
+        
+        for key in keys:
+            val = get_nested(C, key)
+            if val is not None:
+                set_nested(existing, key, attrdict2dict(val))
+        
+        def represent_list(dumper, data):
+            return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
+        
+        yaml.add_representer(list, represent_list)
+        with open(fpath, 'w') as f:
+            yaml.dump(existing, f, default_flow_style=False, indent=2)
 
 
 def get_base_path():
