@@ -4,6 +4,7 @@ import ctypes
 from ctypes import c_int, byref, wintypes
 from global_hotkeys import register_hotkeys, start_checking_hotkeys, stop_checking_hotkeys
 from loguru import logger
+from utils import get_title_bar_dimensions
 
 user32 = ctypes.windll.user32
 
@@ -14,14 +15,36 @@ class RECT(ctypes.Structure):
                 ("bottom", wintypes.LONG)]
 
 
-class WindowManager:
-    def __init__(self, title, cfg, state_file='config.state.yaml', cfg_key='winstate'):
+class OverlayManager:
+    DEFAULT_COLORKEY = (0x25, 0x25, 0x26)
+    DEFAULT_HOTKEY = "alt + shift + t"
+    
+    def __init__(self, title, cfg, state_file='config.state.yaml', win_key='winstate', ui_key='uistate', 
+                 colorkey=None, hotkey=None, on_toggle=None):
         self._title = title
         self._cfg = cfg
         self._state_file = state_file
-        self._cfg_key = cfg_key
+        self._win_key = win_key
+        self._ui_key = ui_key
         self._last_state = None
         self._dpi_scale = self._get_dpi_scale()
+        
+        self.colorkey = colorkey or self.DEFAULT_COLORKEY
+        self.colorkey_rgb = self.colorkey[0] | (self.colorkey[1] << 8) | (self.colorkey[2] << 16)
+        self.enabled = False
+        self._saved_style = None
+        self._saved_exstyle = None
+        self._saved_client_rect = None
+        self._saved_window_pos = None
+        self._toggle_requested = False
+        self._on_toggle = on_toggle
+        self._hotkey = hotkey or self.DEFAULT_HOTKEY
+        self._overlay_pending = False
+        self._setup_hotkey()
+    
+    @property
+    def colorkey_rgba(self):
+        return [self.colorkey[0], self.colorkey[1], self.colorkey[2], 255]
     
     @property
     def dpi_scale(self):
@@ -37,6 +60,13 @@ class WindowManager:
     def _get_hwnd(self):
         return win32gui.FindWindow(None, self._title)
     
+    @property
+    def hwnd(self):
+        hwnd = self._get_hwnd()
+        if hwnd and win32gui.IsWindow(hwnd):
+            return hwnd
+        return None
+    
     def get_state(self):
         hwnd = self._get_hwnd()
         if hwnd:
@@ -50,47 +80,62 @@ class WindowManager:
     
     def load(self, default_x=100, default_y=100, default_w=400, default_h=300):
         from config import dict2attrdict
-        state = self._cfg.get(self._cfg_key, {})
-        x = int(state.get('x', default_x))
-        y = int(state.get('y', default_y))
-        w = int(state.get('w', default_w))
-        h = int(state.get('h', default_h))
+        state = self._cfg.get(self._win_key, {})
+        x, y = int(state.get('x', default_x)), int(state.get('y', default_y))
+        w, h = int(state.get('w', default_w)), int(state.get('h', default_h))
         self._last_state = (x, y, w, h)
+        
+        ui_state = self._cfg.get(self._ui_key, {})
+        self._overlay_pending = ui_state.get('overlay', False)
+        
         return x, y, w, h
-    
-    def load_pos(self, default_x=100, default_y=100):
-        x, y, _, _ = self.load(default_x, default_y)
-        return x, y
     
     def save(self):
         from config import dict2attrdict
         state = self.get_state()
         if state:
-            setattr(self._cfg, self._cfg_key, dict2attrdict({'x': state[0], 'y': state[1], 'w': state[2], 'h': state[3]}))
-            self._cfg.write([self._cfg_key], self._state_file)
+            setattr(self._cfg, self._win_key, dict2attrdict({
+                'x': state[0], 'y': state[1], 'w': state[2], 'h': state[3]
+            }))
+            self._cfg.write([self._win_key], self._state_file)
+    
+    def _save_ui_state(self):
+        from config import dict2attrdict
+        setattr(self._cfg, self._ui_key, dict2attrdict({'overlay': self.enabled}))
+        self._cfg.write([self._ui_key], self._state_file)
     
     def apply(self, x=None, y=None, w=None, h=None):
         hwnd = self._get_hwnd()
-        if hwnd:
-            if self._last_state is None:
-                self.load()
-            if x is None:
-                x = self._last_state[0]
-            if y is None:
-                y = self._last_state[1]
-            if w is None:
-                w = self._last_state[2]
-            if h is None:
-                h = self._last_state[3]
-            win32gui.SetWindowPos(hwnd, 0, x, y, w, h, 0x0004)
+        if not hwnd:
+            return
+        if self._last_state is None:
+            self.load()
+        x = x if x is not None else self._last_state[0]
+        y = y if y is not None else self._last_state[1]
+        w = w if w is not None else self._last_state[2]
+        h = h if h is not None else self._last_state[3]
+        win32gui.SetWindowPos(hwnd, 0, x, y, w, h, 0x0004)
     
     def apply_pos(self, x=None, y=None):
         hwnd = self._get_hwnd()
+        if not hwnd:
+            return
+        if x is None or y is None:
+            px, py = self._last_state[:2] if self._last_state else (100, 100)
+            x, y = x or px, y or py
+        win32gui.SetWindowPos(hwnd, 0, x, y, 0, 0, 0x0001 | 0x0004)
+    
+    def apply_saved_state(self):
+        if not self._overlay_pending:
+            return
+        hwnd = self._get_hwnd()
         if hwnd:
-            if x is None or y is None:
-                px, py = self._last_state[:2] if self._last_state else self.load_pos()
-                x, y = x or px, y or py
-            win32gui.SetWindowPos(hwnd, 0, x, y, 0, 0, 0x0001 | 0x0004)
+            th, bw = get_title_bar_dimensions(hwnd)
+            x, y = self.get_pos()
+            self.apply_pos(x - bw, y - th)
+        self._enable_overlay()
+        if self._on_toggle:
+            self._on_toggle(self.enabled)
     
     def check_and_save(self):
         cur_state = self.get_state()
@@ -99,45 +144,9 @@ class WindowManager:
             self.save()
             return True
         return False
-
-class OverlayWindow:
-    DEFAULT_COLORKEY = (0x25, 0x25, 0x26)
-    DEFAULT_HOTKEY = "alt + shift + t"
-    
-    def __init__(self, title=None, hwnd=None, colorkey=None, hotkey=None, on_toggle=None):
-        self._title = title
-        self._hwnd = hwnd
-        self.colorkey = colorkey or self.DEFAULT_COLORKEY
-        self.colorkey_rgb = self.colorkey[0] | (self.colorkey[1] << 8) | (self.colorkey[2] << 16)
-        self.enabled = False
-        self._saved_style = None
-        self._saved_exstyle = None
-        self._saved_client_rect = None
-        self._saved_window_pos = None
-        self._toggle_requested = False
-        self._on_toggle = on_toggle
-        self._hotkey = hotkey or self.DEFAULT_HOTKEY
-        self._setup_hotkey()
-    
-    @property
-    def hwnd(self):
-        if self._hwnd and win32gui.IsWindow(self._hwnd):
-            return self._hwnd
-        if self._title:
-            hwnd = win32gui.FindWindow(None, self._title)
-            if hwnd:
-                return hwnd
-        logger.error(f"Window not found (hwnd={self._hwnd}, title={self._title})")
-        return None
-    
-    @property
-    def colorkey_rgba(self):
-        return [self.colorkey[0], self.colorkey[1], self.colorkey[2], 255]
     
     def _setup_hotkey(self):
-        bindings = [
-            [self._hotkey, None, self._request_toggle, True],
-        ]
+        bindings = [[self._hotkey, None, self._request_toggle, True]]
         register_hotkeys(bindings)
         start_checking_hotkeys()
     
@@ -156,7 +165,7 @@ class OverlayWindow:
     def cleanup(self):
         stop_checking_hotkeys()
     
-    def enable(self):
+    def _enable_overlay(self):
         hwnd = self.hwnd
         if not hwnd:
             return False
@@ -185,9 +194,10 @@ class OverlayWindow:
                               win32con.SWP_FRAMECHANGED)
         
         self.enabled = True
+        self._save_ui_state()
         return True
-
-    def disable(self):
+    
+    def _disable_overlay(self):
         hwnd = self.hwnd
         if not hwnd or self._saved_style is None:
             return False
@@ -203,12 +213,11 @@ class OverlayWindow:
                               new_w, new_h, win32con.SWP_FRAMECHANGED)
         
         self.enabled = False
+        self._save_ui_state()
         return True
     
     def toggle(self):
-        if self.enabled:
-            return self.disable()
-        return self.enable()
+        return self._disable_overlay() if self.enabled else self._enable_overlay()
     
     def is_overlay_mode(self):
         return self.enabled

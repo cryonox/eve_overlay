@@ -3,8 +3,8 @@ import pyperclip
 import webbrowser
 import time
 from global_hotkeys import register_hotkeys
-from overlay import OverlayWindow, WindowManager
-from config import C
+from overlay import OverlayManager
+from config import C, dict2attrdict
 from services import PilotService, DScanService, PilotState
 from services.dscan_service import get_dscan_info_url
 from pilot_color_classifier import PilotColorClassifier
@@ -46,12 +46,12 @@ class DScanAnalyzer:
             dscan_cfg.get('aggregated_mode_threshold', 50)
         )
         self.dscan_svc = DScanService()
-        self.win_mgr = WindowManager(WIN_TITLE, C, cfg_key='dscan_winstate')
-        self.overlay = OverlayWindow(WIN_TITLE, on_toggle=self.on_overlay_toggle)
+        self.mgr = OverlayManager(WIN_TITLE, C, win_key='dscan_winstate', ui_key='dscan_uistate',
+                                   on_toggle=self.on_overlay_toggle)
         self.last_clip = ""
         self.mode = None
         self.themes = {}
-        self._load_ui_state()
+        self._load_ui_scale()
         
         self.timeout_duration = dscan_cfg.get('timeout', 10)
         self.diff_timeout = dscan_cfg.get('diff_timeout', 60)
@@ -98,30 +98,18 @@ class DScanAnalyzer:
             if self.result_start_time and not self.pause_start_time:
                 self.pause_start_time = time.time()
             self.timeout_expired = False
-        self._save_ui_state()
         self._update_zoom_slider_visibility()
 
-    def _load_ui_state(self):
-        from config import dict2attrdict
+    def _load_ui_scale(self):
         state = C.get('dscan_uistate', {})
         self.ui_scale = float(state.get('scale', 1.0))
-        self._overlay_enabled = state.get('overlay', False)
     
-    def _save_ui_state(self):
-        from config import dict2attrdict
-        C.dscan_uistate = dict2attrdict({
-            'scale': self.ui_scale,
-            'overlay': self.overlay.is_overlay_mode()
-        })
+    def _save_ui_scale(self):
+        state = C.get('dscan_uistate', {})
+        state['scale'] = self.ui_scale
+        C.dscan_uistate = dict2attrdict(state)
         C.write(['dscan_uistate'], 'config.state.yaml')
     
-    def _apply_saved_overlay_state(self):
-        if self._overlay_enabled and not self.overlay.is_overlay_mode():
-            self.overlay.toggle()
-            if self.overlay._on_toggle:
-                self.overlay._on_toggle(self.overlay.enabled)
-        self._update_zoom_slider_visibility()
-
     def _create_scaled_font(self, scale):
         if dpg.does_item_exist("font_registry"):
             return
@@ -146,7 +134,7 @@ class DScanAnalyzer:
         self.ui_scale = val
         dpg.set_global_font_scale(val)
         self.slider_h = None
-        self._save_ui_state()
+        self._save_ui_scale()
     
     def _update_zoom_slider_visibility(self):
         if not dpg.does_item_exist("zoom_container"):
@@ -155,7 +143,7 @@ class DScanAnalyzer:
         if dpg.does_item_exist("zoom_slider") and self.slider_h is None:
             self.slider_h = dpg.get_item_rect_size("zoom_slider")[1]
         
-        is_overlay = self.overlay.is_overlay_mode()
+        is_overlay = self.mgr.is_overlay_mode()
         slider_exists = dpg.does_item_exist("zoom_slider")
         spacer_exists = dpg.does_item_exist("zoom_spacer")
         
@@ -189,12 +177,12 @@ class DScanAnalyzer:
     def setup_gui(self):
         dpg.create_context()
         
-        self.base_font_size = int(16 * self.win_mgr.dpi_scale)
+        self.base_font_size = int(16 * self.mgr.dpi_scale)
         self._create_scaled_font(self.ui_scale)
         
-        win_x, win_y, win_w, win_h = self.win_mgr.load()
-        dpg.create_viewport(title=WIN_TITLE, width=win_w, height=win_h, always_on_top=True,
-                            clear_color=self.overlay.colorkey_rgba, x_pos=win_x, y_pos=win_y)
+        x, y, w, h = self.mgr.load()
+        dpg.create_viewport(title=WIN_TITLE, width=w, height=h, always_on_top=True,
+                            clear_color=self.mgr.colorkey_rgba, x_pos=x, y_pos=y)
         dpg.setup_dearpygui()
         
         with dpg.window(tag="main", no_title_bar=True, no_move=True, no_resize=True,
@@ -213,9 +201,10 @@ class DScanAnalyzer:
         dpg.set_primary_window("main", True)
         dpg.show_viewport()
         dpg.render_dearpygui_frame()
-        self.win_mgr.apply()
+        self.mgr.apply()
         dpg.set_global_font_scale(self.ui_scale)
-        self._apply_saved_overlay_state()
+        self.mgr.apply_saved_state()
+        self._update_zoom_slider_visibility()
     
     def _setup_click_handler(self):
         with dpg.handler_registry(tag="global_click"):
@@ -277,7 +266,7 @@ class DScanAnalyzer:
     
     def _selectable_theme(self, color, hover=False):
         key = f"sel_{color}_{hover}"
-        bg = tuple(self.overlay.colorkey)
+        bg = tuple(self.mgr.colorkey)
         hover_bg = (80, 80, 80, 150) if hover else bg
         return self._get_theme(key, dpg.mvSelectable, [
             (dpg.mvThemeCol_Text, color),
@@ -288,7 +277,7 @@ class DScanAnalyzer:
     
     def _header_theme(self, color=None):
         key = f"hdr_{color}"
-        bg = tuple(self.overlay.colorkey)
+        bg = tuple(self.mgr.colorkey)
         colors = [(dpg.mvThemeCol_Header, bg), (dpg.mvThemeCol_HeaderHovered, bg), (dpg.mvThemeCol_HeaderActive, bg)]
         if color:
             colors.insert(0, (dpg.mvThemeCol_Text, color))
@@ -372,13 +361,14 @@ class DScanAnalyzer:
             dpg.delete_item("pilot_list")
         
         remaining = self.get_remaining_time()
-        if self.overlay.is_overlay_mode() and remaining <= 0:
+        if self.mgr.is_overlay_mode() and remaining <= 0:
             self.timeout_expired = True
-        if self.timeout_expired and self.overlay.is_overlay_mode():
+        if self.timeout_expired and self.mgr.is_overlay_mode():
             return
         
         with dpg.group(tag="pilot_list", parent="main"):
-            dpg.add_selectable(label=f"{len(visible)} | {remaining:.0f}s", user_data=("header", None))
+            lbl = f"{len(visible)} | {remaining:.0f}s"
+            dpg.add_selectable(label=lbl, width=dpg.get_text_size(lbl)[0] + 10, user_data=("header", None))
             dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
             
             for i, (name, pilot) in enumerate(visible):
@@ -392,7 +382,7 @@ class DScanAnalyzer:
                         dpg.draw_rectangle([0, 0], [TAG_W, row_h], fill=rect_fill, color=rect_fill)
                     dpg.add_spacer(width=4)
                     link = pilot.stats_link
-                    dpg.add_selectable(label=label, user_data=("pilot", link) if link else None)
+                    dpg.add_selectable(label=label, width=dpg.get_text_size(label)[0] + 10, user_data=("pilot", link) if link else None)
                     dpg.bind_item_theme(dpg.last_item(), self._selectable_theme(self.get_pilot_color(pilot), hover=True))
 
     def render_pilots_aggregated(self, visible):
@@ -403,16 +393,17 @@ class DScanAnalyzer:
             dpg.delete_item("aggr_content")
         
         remaining = self.get_remaining_time()
-        if self.overlay.is_overlay_mode() and remaining <= 0:
+        if self.mgr.is_overlay_mode() and remaining <= 0:
             self.timeout_expired = True
-        if self.timeout_expired and self.overlay.is_overlay_mode():
+        if self.timeout_expired and self.mgr.is_overlay_mode():
             return
         
         alliance_cnt, corps_by_alliance, no_alliance_corps, grp_cnt = self._aggregate_pilots(visible)
         total = len(visible)
         
         with dpg.group(tag="aggr_content", parent="main"):
-            dpg.add_selectable(label=f"{total} | {remaining:.0f}s", user_data=("header", None))
+            lbl = f"{total} | {remaining:.0f}s"
+            dpg.add_selectable(label=lbl, width=dpg.get_text_size(lbl)[0] + 10, user_data=("header", None))
             dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
             
             if any(grp_cnt.values()):
@@ -533,9 +524,9 @@ class DScanAnalyzer:
             dpg.delete_item("dscan_content")
         
         remaining = self.get_remaining_time()
-        if self.overlay.is_overlay_mode() and remaining <= 0:
+        if self.mgr.is_overlay_mode() and remaining <= 0:
             self.timeout_expired = True
-        if self.timeout_expired and self.overlay.is_overlay_mode():
+        if self.timeout_expired and self.mgr.is_overlay_mode():
             return
         
         ship_diffs = self.dscan_svc.get_ship_diffs()
@@ -571,7 +562,8 @@ class DScanAnalyzer:
             return f" (+{d})" if d > 0 else f" ({d})" if d < 0 else ""
         
         with dpg.group(tag="dscan_content", parent="main"):
-            dpg.add_selectable(label=f"{res.total_ships} | {remaining:.0f}s", user_data=("header", None))
+            lbl = f"{res.total_ships} | {remaining:.0f}s"
+            dpg.add_selectable(label=lbl, width=dpg.get_text_size(lbl)[0] + 10, user_data=("header", None))
             dpg.bind_item_theme(dpg.last_item(), self._selectable_theme((0, 255, 0), hover=True))
             
             with dpg.group(horizontal=True):
@@ -628,14 +620,14 @@ class DScanAnalyzer:
         self.paused_time = 0
         self.pause_start_time = None
         self.timeout_expired = False
-        if not self.overlay.is_overlay_mode():
+        if not self.mgr.is_overlay_mode():
             self.pause_start_time = time.time()
     
     def run_loop(self):
         while dpg.is_dearpygui_running():
-            self.overlay.process_hotkey()
+            self.mgr.process_hotkey()
             self.process_aggr_hotkey()
-            self.win_mgr.check_and_save()
+            self.mgr.check_and_save()
             self.check_clipboard()
             
             if self.mode == 'pilots':
@@ -648,7 +640,7 @@ class DScanAnalyzer:
     def start(self):
         self.setup_gui()
         self.run_loop()
-        self.overlay.cleanup()
+        self.mgr.cleanup()
         dpg.destroy_context()
 
 def main():
