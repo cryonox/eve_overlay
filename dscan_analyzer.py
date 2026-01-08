@@ -660,6 +660,11 @@ class DScanAnalyzer:
         if not self.mgr.is_overlay_mode():
             self.pause_start_time = time.time()
     
+    def _should_skip_render(self):
+        if not self.mode:
+            return True
+        return self.timeout_expired and self.mgr.is_overlay_mode()
+
     def run_loop(self):
         self._needs_resize = False
         while dpg.is_dearpygui_running():
@@ -667,7 +672,12 @@ class DScanAnalyzer:
             self.process_aggr_hotkey()
             self.mgr.check_and_save()
             self.check_clipboard()
-            
+
+            if self._should_skip_render():
+                dpg.render_dearpygui_frame()
+                time.sleep(0.1)
+                continue
+
             if self.mode == 'pilots':
                 self.render_pilots()
             elif self.mode == 'dscan':
