@@ -8,7 +8,9 @@ dscan:
   enabled: true
   font_scale: 0.5
   font_thickness: 1
-  hotkey_transparency: alt+shift+f
+  hotkey_overlay: alt+shift+f
+  hotkey_clickthrough: alt+shift+a
+  hotkey_bg: alt+shift+s
   hotkey_mode: alt+shift+m
   stats_provider: zkill
   rate_limit_retry_delay: 5

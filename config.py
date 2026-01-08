@@ -90,7 +90,9 @@ def create_default_config(fpath):
         'dscan': {
             'enabled': True,
             'ignore': [],
-            'hotkey_transparency': 'alt+shift+f',
+            'hotkey_overlay': 'alt+shift+t',
+            'hotkey_clickthrough': 'alt+shift+c',
+            'hotkey_bg': 'alt+shift+b',
             'hotkey_mode': 'alt+shift+m',
             'hotkey_clear_cache': 'alt+shift+e',
             'transparency_on': True,

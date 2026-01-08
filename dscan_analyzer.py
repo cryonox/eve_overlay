@@ -55,7 +55,7 @@ class DScanAnalyzer:
             bg_color=bg_color,
             hotkey_overlay=dscan_cfg.get('hotkey_overlay'),
             hotkey_clickthrough=dscan_cfg.get('hotkey_clickthrough'),
-            hotkey_transparent=dscan_cfg.get('hotkey_transparent'),
+            hotkey_transparent=dscan_cfg.get('hotkey_bg'),
             on_toggle=self.on_overlay_toggle
         )
         self.last_clip = ""
