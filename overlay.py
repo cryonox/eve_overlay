@@ -256,7 +256,7 @@ class OverlayManager:
         style = self._saved_style & ~win32con.WS_CAPTION & ~win32con.WS_THICKFRAME & ~win32con.WS_SYSMENU
         win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
 
-        exstyle = self._saved_exstyle | win32con.WS_EX_LAYERED
+        exstyle = self._saved_exstyle | win32con.WS_EX_LAYERED | win32con.WS_EX_TOOLWINDOW
         if self.clickthrough:
             exstyle |= win32con.WS_EX_TRANSPARENT
         else:
