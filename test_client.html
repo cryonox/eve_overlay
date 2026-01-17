@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>EVE Overlay Test Client</title>
+    <style>
+        body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
+        textarea { width: 400px; height: 150px; background: #2a2a2a; color: #eee; border: 1px solid #444; padding: 10px; }
+        button { padding: 10px 20px; background: #4a4a4a; color: #eee; border: none; cursor: pointer; margin: 10px 0; }
+        button:hover { background: #5a5a5a; }
+        #results { margin-top: 20px; }
+        .pilot { padding: 5px 0; border-bottom: 1px solid #333; }
+        .ship { padding: 3px 0; }
+        .group { margin: 10px 0; }
+        .group-header { color: #ff0; cursor: pointer; }
+        .state-SEARCHING_ESI, .state-SEARCHING_STATS { color: yellow; }
+        .state-FOUND, .state-CACHE_HIT { color: #0f0; }
+        .state-NOT_FOUND { color: #888; }
+        .state-ERROR { color: red; }
+        .event { color: #888; font-size: 12px; margin: 5px 0; }
+        .diff-pos { color: #0f0; }
+        .diff-neg { color: #f55; }
+    </style>
+</head>
+<body>
+    <h2>EVE Overlay Test Client</h2>
+    <div>
+        <textarea id="input" placeholder="Enter pilot names or dscan data">cryonox
+Tara Read</textarea>
+    </div>
+    <button onclick="lookup()">Lookup</button>
+    <select id="sortBy" onchange="renderPilots()">
+        <option value="name">Sort: Name</option>
+        <option value="danger">Sort: Danger</option>
+        <option value="kills" selected>Sort: Kills</option>
+        <option value="losses">Sort: Losses</option>
+        <option value="state">Sort: State</option>
+    </select>
+    <span id="status"></span>
+    <div id="events"></div>
+    <div id="results"></div>
+
+    <script>
+        const API = 'http://127.0.0.1:8721';
+        let pilots = {};
+        let dscanData = null;
+
+        function isDscanFormat(data) {
+            const lines = data.trim().split('\n').slice(0, 5);
+            return lines.length > 0 && lines.some(line => line.includes('\t'));
+        }
+
+        function lookup() {
+            const input = document.getElementById('input').value;
+            pilots = {};
+            dscanData = null;
+            document.getElementById('results').innerHTML = '';
+            document.getElementById('events').innerHTML = '';
+            document.getElementById('status').textContent = 'Connecting...';
+
+            if (isDscanFormat(input)) {
+                lookupDscan(input);
+            } else {
+                lookupPilots(input);
+            }
+        }
+
+        function lookupDscan(data) {
+            document.getElementById('events').innerHTML = '<div class="event">Detected dscan format</div>';
+            
+            fetch(`${API}/dscan/parse`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ data: data, diff_timeout: 60.0 })
+            }).then(resp => {
+                if (!resp.ok) return resp.json().then(e => { throw new Error(e.error); });
+                return resp.json();
+            }).then(result => {
+                dscanData = result;
+                document.getElementById('status').textContent = 'Done';
+                renderDscan();
+            }).catch(err => {
+                document.getElementById('status').textContent = 'Error: ' + err.message;
+            });
+        }
+
+        function renderDscan() {
+            if (!dscanData) return;
+            const resultsDiv = document.getElementById('results');
+            let html = `<div><b>Total Ships: ${dscanData.total_ships}</b></div>`;
+            
+            if (dscanData.dscan_url) {
+                html += `<div><a href="${dscanData.dscan_url}" target="_blank" style="color:#88f">View on dscan.info</a></div>`;
+            }
+            
+            const groups = Object.entries(dscanData.group_totals).sort((a, b) => b[1] - a[1]);
+            for (const [grp, cnt] of groups) {
+                const diff = dscanData.group_diffs[grp] || 0;
+                const diffStr = diff > 0 ? `<span class="diff-pos">+${diff}</span>` : diff < 0 ? `<span class="diff-neg">${diff}</span>` : '';
+                html += `<div class="group"><div class="group-header">${grp}: ${cnt} ${diffStr}</div>`;
+                
+                const ships = dscanData.ship_counts[grp];
+                if (ships) {
+                    const sorted = Object.entries(ships).sort((a, b) => b[1] - a[1]);
+                    for (const [ship, shipCnt] of sorted) {
+                        const shipDiff = dscanData.ship_diffs[ship] || 0;
+                        const shipDiffStr = shipDiff > 0 ? `<span class="diff-pos">+${shipDiff}</span>` : shipDiff < 0 ? `<span class="diff-neg">${shipDiff}</span>` : '';
+                        html += `<div class="ship">  ${ship}: ${shipCnt} ${shipDiffStr}</div>`;
+                    }
+                }
+                html += '</div>';
+            }
+            resultsDiv.innerHTML = html;
+        }
+
+        function lookupPilots(names) {
+            fetch(`${API}/pilots/lookup`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ names: names })
+            }).then(response => {
+                if (!response.ok) return response.json().then(e => { throw new Error(e.error); });
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                document.getElementById('status').textContent = 'Streaming...';
+
+                function read() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) {
+                            document.getElementById('status').textContent = 'Done';
+                            return;
+                        }
+                        buf += decoder.decode(value, { stream: true });
+                        const parts = buf.split('\n\n');
+                        buf = parts.pop();
+                        for (const part of parts) {
+                            const line = part.trim();
+                            if (line.startsWith('data: ')) {
+                                try {
+                                    const data = JSON.parse(line.slice(6));
+                                    handlePilotEvent(data);
+                                } catch (e) {
+                                    console.error('JSON parse error:', e, line.slice(0, 100));
+                                }
+                            }
+                        }
+                        read();
+                    });
+                }
+                read();
+            }).catch(err => {
+                document.getElementById('status').textContent = 'Error: ' + err.message;
+            });
+        }
+
+        function handlePilotEvent(evt) {
+            const eventsDiv = document.getElementById('events');
+            const pending = Object.values(pilots).filter(p => 
+                !['FOUND', 'NOT_FOUND', 'ERROR', 'CACHE_HIT', 'RATE_LIMITED'].includes(p.state)
+            ).length;
+            const total = Object.keys(pilots).length;
+            eventsDiv.innerHTML = `<div class="event">[${evt.type}] ${evt.updated ? evt.updated.join(', ') : 'all'} (${total - pending}/${total} done)</div>` + eventsDiv.innerHTML;
+
+            if (evt.pilots) {
+                for (const [name, data] of Object.entries(evt.pilots)) {
+                    pilots[name] = data;
+                }
+            }
+            renderPilots();
+        }
+
+        function renderPilots() {
+            const resultsDiv = document.getElementById('results');
+            const sortBy = document.getElementById('sortBy').value;
+            const sorted = Object.entries(pilots).sort((a, b) => {
+                const [, pa] = a, [, pb] = b;
+                if (sortBy === 'name') return a[0].localeCompare(b[0]);
+                if (sortBy === 'state') return pa.state.localeCompare(pb.state);
+                const va = pa.stats?.[sortBy] ?? -1;
+                const vb = pb.stats?.[sortBy] ?? -1;
+                return vb - va;
+            });
+            let html = '';
+            for (const [name, p] of sorted) {
+                const stats = p.stats ? `D:${p.stats.danger} K:${p.stats.kills} L:${p.stats.losses}` : '-';
+                html += `<div class="pilot state-${p.state}">
+                    <b>${name}</b> | ${p.state} | ${stats}
+                    ${p.corp_name ? `| ${p.corp_name}` : ''}
+                    ${p.alliance_name ? `[${p.alliance_name}]` : ''}
+                </div>`;
+            }
+            resultsDiv.innerHTML = html;
+        }
+    </script>
+</body>
+</html>

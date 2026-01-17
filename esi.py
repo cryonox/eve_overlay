@@ -173,8 +173,9 @@ class ESIResolver:
                     }
                     self.char_cache[char_id] = info
                     return info
+                logger.warning(f"ESI char info status {response.status} for {char_id}")
         except Exception as e:
-            logger.info(f"ESI char info error for {char_id}: {e}")
+            logger.warning(f"ESI char info error for {char_id}: {e}")
         return {}
 
     async def resolve_ids_to_names(self, session: aiohttp.ClientSession, ids: List[int]) -> Dict[int, str]:

@@ -227,12 +227,14 @@ class PilotService:
             return
         try:
             char_info = await self.esi.get_char_info(session, pilot.char_id)
+            logger.debug(f"ESI char_info for {pilot.name} ({pilot.char_id}): {char_info}")
             new_corp_id = char_info.get('corporation_id')
             new_alliance_id = char_info.get('alliance_id')
 
             ids = [i for i in [new_corp_id, new_alliance_id] if i]
             if ids:
                 names = await self.esi.resolve_ids_to_names(session, ids)
+                logger.debug(f"ESI names for {pilot.name}: corp={new_corp_id}->{names.get(new_corp_id)}, alliance={new_alliance_id}->{names.get(new_alliance_id)}")
                 pilot.corp_id = new_corp_id
                 pilot.alliance_id = new_alliance_id
                 pilot.corp_name = names.get(new_corp_id, 'Unknown')

@@ -1,7 +1,11 @@
 cache: cache
+api:
+  enabled: false
+  host: 127.0.0.1
+  port: 8721
 logging:
   enabled: true
-  level: DEBUG
+  level: INFO
 dscan:
   font: C:/Windows/Fonts/arial.ttf
   bg_color: [45, 45, 145]

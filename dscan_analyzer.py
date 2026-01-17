@@ -2,12 +2,15 @@ import dearpygui.dearpygui as dpg
 import pyperclip
 import webbrowser
 import time
+import atexit
 from global_hotkeys import register_hotkeys
 from overlay import OverlayManager
 from config import C, dict2attrdict
-from services import PilotService, DScanService, PilotState
+from services import PilotService, DScanService, PilotState, PilotAPIClient
+from services.api.client import ServerConfig
 from services.dscan_service import get_dscan_info_url
 from pilot_color_classifier import PilotColorClassifier
+from loguru import logger
 
 def bgr_to_rgb(color):
     return (color[2], color[1], color[0])
@@ -39,12 +42,19 @@ class DScanAnalyzer:
         cache_dir = C.get('cache', 'cache')
         dscan_cfg = C.dscan
         
-        self.pilot_svc = PilotService(
-            cache_dir, 
-            dscan_cfg.get('stats_provider', 'zkill'),
-            dscan_cfg.get('rate_limit_retry_delay', 5),
-            dscan_cfg.get('aggregated_mode_threshold', 50)
-        )
+        use_api = C.get('api', {}).get('enabled', False)
+        if use_api:
+            srv_cfg = ServerConfig.from_config(C)
+            self.pilot_svc = PilotAPIClient(srv_cfg)
+            logger.info('Using api service')
+            atexit.register(self._shutdown_api)
+        else:
+            self.pilot_svc = PilotService(
+                cache_dir, 
+                dscan_cfg.get('stats_provider', 'zkill'),
+                dscan_cfg.get('rate_limit_retry_delay', 5),
+                dscan_cfg.get('aggregated_mode_threshold', 50)
+            )
         self.dscan_svc = DScanService()
         
         bg_color = dscan_cfg.get('bg_color', None)
@@ -695,7 +705,12 @@ class DScanAnalyzer:
         self.setup_gui()
         self.run_loop()
         self.mgr.cleanup()
+        self._shutdown_api()
         dpg.destroy_context()
+    
+    def _shutdown_api(self):
+        if hasattr(self.pilot_svc, 'shutdown'):
+            self.pilot_svc.shutdown()
 
 def main():
     DScanAnalyzer().start()
