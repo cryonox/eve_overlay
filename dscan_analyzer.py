@@ -113,20 +113,27 @@ class DScanAnalyzer:
         self.corp_ids = {}
 
         self.quit_requested = False
+        self.monitor_clipboard_enabled = True
         self.tray = TrayManager(
             on_toggle_overlay=self.mgr._request_toggle_overlay,
             on_toggle_clickthrough=self.mgr._request_toggle_clickthrough,
             on_toggle_text_bg=self.mgr._request_toggle_text_bg,
             on_toggle_corp_mode=self._request_aggr_toggle,
+            on_toggle_monitor_clipboard=self._toggle_monitor_clipboard,
             on_quit=self._request_quit,
             is_overlay=lambda: self.mgr.overlay,
             is_clickthrough=lambda: self.mgr.clickthrough,
             is_text_bg=lambda: self.mgr.text_bg,
             is_corp_mode=lambda: self.aggr_mode,
+            is_monitor_clipboard=lambda: self.monitor_clipboard_enabled,
         )
 
     def _request_quit(self):
         self.quit_requested = True
+
+    def _toggle_monitor_clipboard(self):
+        self.monitor_clipboard_enabled = not self.monitor_clipboard_enabled
+        logger.info(f"tray: monitor_clipboard -> {self.monitor_clipboard_enabled}")
     
     def on_overlay_toggle(self):
         if self.mgr.overlay:
@@ -702,7 +709,8 @@ class DScanAnalyzer:
             self.mgr.process_hotkeys()
             self.process_aggr_hotkey()
             self.mgr.check_and_save()
-            self.check_clipboard()
+            if self.monitor_clipboard_enabled:
+                self.check_clipboard()
 
             if self._should_skip_render():
                 dpg.render_dearpygui_frame()

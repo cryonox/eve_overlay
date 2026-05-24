@@ -33,18 +33,21 @@ def _make_icon():
 
 class TrayManager:
     def __init__(self, on_toggle_overlay=None, on_toggle_clickthrough=None,
-                 on_toggle_text_bg=None, on_toggle_corp_mode=None, on_quit=None,
+                 on_toggle_text_bg=None, on_toggle_corp_mode=None,
+                 on_toggle_monitor_clipboard=None, on_quit=None,
                  is_overlay=None, is_clickthrough=None, is_text_bg=None,
-                 is_corp_mode=None):
+                 is_corp_mode=None, is_monitor_clipboard=None):
         self.on_toggle_overlay = on_toggle_overlay
         self.on_toggle_clickthrough = on_toggle_clickthrough
         self.on_toggle_text_bg = on_toggle_text_bg
         self.on_toggle_corp_mode = on_toggle_corp_mode
+        self.on_toggle_monitor_clipboard = on_toggle_monitor_clipboard
         self.on_quit = on_quit
         self.is_overlay = is_overlay or (lambda: False)
         self.is_clickthrough = is_clickthrough or (lambda: False)
         self.is_text_bg = is_text_bg or (lambda: False)
         self.is_corp_mode = is_corp_mode or (lambda: False)
+        self.is_monitor_clipboard = is_monitor_clipboard or (lambda: True)
         self._icon = None
         self._thread = None
 
@@ -85,6 +88,10 @@ class TrayManager:
                 pystray.MenuItem(
                     'Corp mode (aggregate)', self._wrap_toggle(self.on_toggle_corp_mode),
                     checked=lambda item: self.is_corp_mode(),
+                ),
+                pystray.MenuItem(
+                    'Monitor clipboard', self._wrap_toggle(self.on_toggle_monitor_clipboard),
+                    checked=lambda item: self.is_monitor_clipboard(),
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem('Exit', quit_app),
