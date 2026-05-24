@@ -34,22 +34,38 @@ def _make_icon():
 class TrayManager:
     def __init__(self, on_toggle_overlay=None, on_toggle_clickthrough=None,
                  on_toggle_text_bg=None, on_toggle_corp_mode=None,
-                 on_toggle_monitor_clipboard=None, on_quit=None,
+                 on_toggle_monitor_clipboard=None, on_toggle_console_log=None,
+                 on_quit=None,
                  is_overlay=None, is_clickthrough=None, is_text_bg=None,
-                 is_corp_mode=None, is_monitor_clipboard=None):
+                 is_corp_mode=None, is_monitor_clipboard=None,
+                 is_console_log=None):
         self.on_toggle_overlay = on_toggle_overlay
         self.on_toggle_clickthrough = on_toggle_clickthrough
         self.on_toggle_text_bg = on_toggle_text_bg
         self.on_toggle_corp_mode = on_toggle_corp_mode
         self.on_toggle_monitor_clipboard = on_toggle_monitor_clipboard
+        self.on_toggle_console_log = on_toggle_console_log
         self.on_quit = on_quit
         self.is_overlay = is_overlay or (lambda: False)
         self.is_clickthrough = is_clickthrough or (lambda: False)
         self.is_text_bg = is_text_bg or (lambda: False)
         self.is_corp_mode = is_corp_mode or (lambda: False)
         self.is_monitor_clipboard = is_monitor_clipboard or (lambda: True)
+        self.is_console_log = is_console_log or (lambda: False)
         self._icon = None
         self._thread = None
+        # update_menu() rebuilds the native menu (DestroyMenu + recreate); it can
+        # be driven from both the pystray thread and the dpg main loop, so guard it.
+        self._menu_lock = threading.Lock()
+
+    def update_menu(self):
+        """Rebuild the tray menu so checkmarks reflect current state."""
+        with self._menu_lock:
+            if self._icon:
+                try:
+                    self._icon.update_menu()
+                except Exception:
+                    logger.exception("tray: update_menu failed")
 
     def _wrap_toggle(self, cb):
         def handler(icon, item):
@@ -58,8 +74,7 @@ class TrayManager:
                     cb()
                 except Exception:
                     logger.exception("tray: toggle handler failed")
-            if self._icon:
-                self._icon.update_menu()
+            self.update_menu()
         return handler
 
     def start(self):
@@ -92,6 +107,10 @@ class TrayManager:
                 pystray.MenuItem(
                     'Monitor clipboard', self._wrap_toggle(self.on_toggle_monitor_clipboard),
                     checked=lambda item: self.is_monitor_clipboard(),
+                ),
+                pystray.MenuItem(
+                    'Show console log', self._wrap_toggle(self.on_toggle_console_log),
+                    checked=lambda item: self.is_console_log(),
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem('Exit', quit_app),

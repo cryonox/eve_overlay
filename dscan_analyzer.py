@@ -11,6 +11,7 @@ from services.api.client import ServerConfig
 from services.dscan_service import get_dscan_info_url
 from pilot_color_classifier import PilotColorClassifier
 from tray import TrayManager
+import console_log
 from loguru import logger
 
 def bgr_to_rgb(color):
@@ -120,12 +121,16 @@ class DScanAnalyzer:
             on_toggle_text_bg=self.mgr._request_toggle_text_bg,
             on_toggle_corp_mode=self._request_aggr_toggle,
             on_toggle_monitor_clipboard=self._toggle_monitor_clipboard,
+            on_toggle_console_log=self._toggle_console_log,
             on_quit=self._request_quit,
             is_overlay=lambda: self.mgr.overlay,
             is_clickthrough=lambda: self.mgr.clickthrough,
             is_text_bg=lambda: self.mgr.text_bg,
-            is_corp_mode=lambda: self.aggr_mode,
+            is_corp_mode=lambda: (self.aggr_mode_manual
+                                  if self.aggr_mode_manual is not None
+                                  else self.aggr_mode),
             is_monitor_clipboard=lambda: self.monitor_clipboard_enabled,
+            is_console_log=console_log.is_shown,
         )
 
     def _request_quit(self):
@@ -134,6 +139,9 @@ class DScanAnalyzer:
     def _toggle_monitor_clipboard(self):
         self.monitor_clipboard_enabled = not self.monitor_clipboard_enabled
         logger.info(f"tray: monitor_clipboard -> {self.monitor_clipboard_enabled}")
+
+    def _toggle_console_log(self):
+        console_log.toggle(level=C.logging.get('level', 'INFO').upper())
     
     def on_overlay_toggle(self):
         if self.mgr.overlay:
@@ -308,9 +316,15 @@ class DScanAnalyzer:
             elif action == "toggle":
                 cur = self._get_collapse_state(data)
                 self._set_collapse_state(data, not cur)
+            elif action == "mode_toggle":
+                self.aggr_toggle_requested = True
             break
 
     def _setup_aggr_hotkey(self):
+        # Corp mode is toggled from the tray and the header button; only bind a
+        # hotkey if one is configured (set hotkey_mode to null to disable).
+        if not self.aggr_hotkey:
+            return
         bindings = [[self.aggr_hotkey, None, self._request_aggr_toggle, True]]
         register_hotkeys(bindings)
     
@@ -323,7 +337,15 @@ class DScanAnalyzer:
         self.aggr_toggle_requested = False
         self.aggr_mode_manual = not self.aggr_mode if self.aggr_mode_manual is None else not self.aggr_mode_manual
         return True
-    
+
+    def _add_pilot_header(self, count, remaining):
+        # Count | time, followed by a 1-char button that toggles corp/pilot mode.
+        with dpg.group(horizontal=True):
+            self.add_item(f"{count} | {remaining:.0f}s", (0, 255, 0), ("header", None))
+            dpg.add_spacer(width=6)
+            mode_char = "C" if self.aggr_mode else "P"
+            self.add_item(mode_char, (0, 255, 0), ("mode_toggle", None))
+
     def _get_theme(self, key, component, colors):
         if key not in self.themes:
             with dpg.theme() as theme:
@@ -476,9 +498,8 @@ class DScanAnalyzer:
             return
         
         with dpg.group(tag="pilot_list", parent="main"):
-            lbl = f"{len(visible)} | {remaining:.0f}s"
-            self.add_item(lbl, (0, 255, 0), ("header", None))
-            
+            self._add_pilot_header(len(visible), remaining)
+
             for i, (name, pilot) in enumerate(visible):
                 row_h = dpg.get_text_size(name)[1]
                 tag_color = self.get_pilot_tag_color(pilot)
@@ -510,9 +531,8 @@ class DScanAnalyzer:
         sorted_alliances = sorted(alliance_cnt.items(), key=lambda x: (x[0] == "No Alliance", -x[1]))
         
         with dpg.group(tag="aggr_content", parent="main"):
-            lbl = f"{total} | {remaining:.0f}s"
-            self.add_item(lbl, (0, 255, 0), ("header", None))
-            
+            self._add_pilot_header(total, remaining)
+
             if any(grp_cnt.values()):
                 with dpg.group(horizontal=True):
                     for grp_name, cnt in grp_cnt.items():
@@ -706,8 +726,13 @@ class DScanAnalyzer:
             if self.quit_requested:
                 dpg.stop_dearpygui()
                 break
-            self.mgr.process_hotkeys()
-            self.process_aggr_hotkey()
+            changed = self.mgr.process_hotkeys()
+            if self.process_aggr_hotkey():
+                changed = True
+            if changed:
+                # State was just applied on this thread; refresh the tray so its
+                # checkmarks reflect it (pystray bakes them in at menu build time).
+                self.tray.update_menu()
             self.mgr.check_and_save()
             if self.monitor_clipboard_enabled:
                 self.check_clipboard()
