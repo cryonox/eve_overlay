@@ -22,7 +22,7 @@ class OverlayManager:
     
     def __init__(self, title, cfg, state_file='config.state.yaml', win_key='winstate', ui_key='uistate',
                  colorkey=None, bg_color=None, transparency=255, hotkey_overlay=None, hotkey_clickthrough=None,
-                 hotkey_transparent=None, on_toggle=None):
+                 hotkey_transparent=None, on_toggle=None, hotkeys=True):
         self._title = title
         self._cfg = cfg
         self._state_file = state_file
@@ -56,7 +56,8 @@ class OverlayManager:
         self._hotkey_text_bg = hotkey_transparent or self.DEFAULT_HOTKEY_TRANSPARENT
 
         self._pending_state = None
-        self._setup_hotkeys()
+        if hotkeys:
+            self._setup_hotkeys()
 
     @property
     def colorkey_rgba(self):
@@ -222,7 +223,10 @@ class OverlayManager:
         return changed
     
     def cleanup(self):
-        stop_checking_hotkeys()
+        try:
+            stop_checking_hotkeys()
+        except Exception:
+            pass
     
     def _save_window_state(self):
         hwnd = self.hwnd
@@ -303,6 +307,31 @@ class OverlayManager:
         self._save_ui_state()
         return True
     
+    def set_overlay(self, val):
+        if bool(val) != self.overlay:
+            self.toggle_overlay()
+            return True
+        return False
+
+    def set_clickthrough(self, val):
+        # clickthrough only applies while in overlay mode
+        if self.overlay and bool(val) != self.clickthrough:
+            self.toggle_clickthrough()
+            return True
+        return False
+
+    def set_text_bg(self, val):
+        if bool(val) != self.text_bg:
+            self.toggle_text_bg()
+            return True
+        return False
+
+    def set_transparency(self, alpha):
+        """Set the layered-window alpha (0-255). Applies live when in overlay."""
+        self.transparency = max(0, min(255, int(alpha)))
+        if self.overlay:
+            self._apply_window_style()
+
     def toggle_overlay(self):
         return self._disable_overlay() if self.overlay else self._enable_overlay()
     

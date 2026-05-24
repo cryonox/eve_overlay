@@ -1,5 +1,6 @@
 import yaml
 from pathlib import Path
+import os
 import sys
 import threading
 from loguru import logger
@@ -103,6 +104,17 @@ def create_default_config(fpath):
             'timeout': 15,
             'diff_timeout': 60,
             'group_rect_width': 3
+        },
+        'dps': {
+            'enabled': True,
+            'font': 'C:/Windows/Fonts/consolab.ttf',
+            'dps_window': 30,
+            'dps_alarm_thresh': 80,
+            'mining_alarm_thresh': 35,
+            'mining_alarm_interval': 30,
+            'ignore': [],
+            'transparency': 180,
+            'bg_color': [60, 60, 60]
         }
     }
 
@@ -157,9 +169,12 @@ def configure_logger(cfg):
     # guard before adding so logger.add doesn't choke on a None sink.
     if sys.stderr is not None:
         logger.add(sys.stderr, level=level)
-    elif getattr(sys, 'frozen', False):
-        # No console to write to -- log to a file next to the exe instead.
-        log_file = Path(sys.executable).resolve().parent / 'eve_overlay.log'
+    else:
+        # No console (windowed build, or a child spawned with no console) -- log
+        # to a per-module file so the supervisor and each window child don't
+        # fight over one log file.
+        module = os.environ.get('EVE_OVERLAY_MODULE', 'app')
+        log_file = get_base_path() / f'eve_overlay_{module}.log'
         logger.add(str(log_file), level=level, rotation='5 MB')
 
 

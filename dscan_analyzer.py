@@ -10,8 +10,7 @@ from services import PilotService, DScanService, PilotState, PilotAPIClient
 from services.api.client import ServerConfig
 from services.dscan_service import get_dscan_info_url
 from pilot_color_classifier import PilotColorClassifier
-from tray import TrayManager
-import console_log
+import ipc
 from loguru import logger
 
 def bgr_to_rgb(color):
@@ -62,13 +61,14 @@ class DScanAnalyzer:
         bg_color = dscan_cfg.get('bg_color', None)
         transparency = dscan_cfg.get('transparency', 255)
 
+        # Overlay state is driven by the supervisor (via control.json), so this
+        # child registers no hotkeys of its own and persists window/ui state to
+        # its own state file to avoid cross-process clobbering of config.state.
         self.mgr = OverlayManager(
-            WIN_TITLE, C, win_key='dscan_winstate', ui_key='dscan_uistate',
+            WIN_TITLE, C, state_file='config.state.dscan.yaml',
+            win_key='dscan_winstate', ui_key='dscan_uistate',
             bg_color=bg_color, transparency=transparency,
-            hotkey_overlay=dscan_cfg.get('hotkey_overlay'),
-            hotkey_clickthrough=dscan_cfg.get('hotkey_clickthrough'),
-            hotkey_transparent=dscan_cfg.get('hotkey_bg'),
-            on_toggle=self.on_overlay_toggle
+            on_toggle=self.on_overlay_toggle, hotkeys=False,
         )
         self.last_clip = ""
         self.mode = None
@@ -115,33 +115,41 @@ class DScanAnalyzer:
 
         self.quit_requested = False
         self.monitor_clipboard_enabled = True
-        self.tray = TrayManager(
-            on_toggle_overlay=self.mgr._request_toggle_overlay,
-            on_toggle_clickthrough=self.mgr._request_toggle_clickthrough,
-            on_toggle_text_bg=self.mgr._request_toggle_text_bg,
-            on_toggle_corp_mode=self._request_aggr_toggle,
-            on_toggle_monitor_clipboard=self._toggle_monitor_clipboard,
-            on_toggle_console_log=self._toggle_console_log,
-            on_quit=self._request_quit,
-            is_overlay=lambda: self.mgr.overlay,
-            is_clickthrough=lambda: self.mgr.clickthrough,
-            is_text_bg=lambda: self.mgr.text_bg,
-            is_corp_mode=lambda: (self.aggr_mode_manual
-                                  if self.aggr_mode_manual is not None
-                                  else self.aggr_mode),
-            is_monitor_clipboard=lambda: self.monitor_clipboard_enabled,
-            is_console_log=console_log.is_shown,
-        )
+        # Control-file (supervisor) sync state.
+        self._control_mtime = -1.0
+        self._corp_toggle_seen = 0
 
-    def _request_quit(self):
-        self.quit_requested = True
-
-    def _toggle_monitor_clipboard(self):
-        self.monitor_clipboard_enabled = not self.monitor_clipboard_enabled
-        logger.info(f"tray: monitor_clipboard -> {self.monitor_clipboard_enabled}")
-
-    def _toggle_console_log(self):
-        console_log.toggle(level=C.logging.get('level', 'INFO').upper())
+    def _apply_control(self):
+        """Mirror the supervisor's desired state from control.json (cheap;
+        only re-read when the file changes)."""
+        mt = ipc.mtime(ipc.CONTROL_FILE)
+        if mt == self._control_mtime:
+            return
+        self._control_mtime = mt
+        ctl = ipc.read_json(ipc.CONTROL_FILE)
+        if not ctl:
+            return
+        if not ctl.get('modules', {}).get('dscan', True):
+            self.quit_requested = True
+            return
+        changed = False
+        if self.mgr.set_overlay(ctl.get('overlay', False)):
+            changed = True
+        if self.mgr.set_clickthrough(ctl.get('clickthrough', False)):
+            changed = True
+        if self.mgr.set_text_bg(ctl.get('text_bg', False)):
+            changed = True
+        if 'transparency' in ctl:
+            self.mgr.set_transparency(ctl['transparency'])
+        if changed:
+            # mirror the old hotkey path: refresh zoom-slider visibility + themes
+            self.on_overlay_toggle()
+        dscan = ctl.get('dscan', {})
+        self.monitor_clipboard_enabled = dscan.get('monitor_clipboard', True)
+        corp_toggle = int(dscan.get('corp_toggle', 0))
+        if corp_toggle != self._corp_toggle_seen:
+            self._corp_toggle_seen = corp_toggle
+            self.aggr_toggle_requested = True
     
     def on_overlay_toggle(self):
         if self.mgr.overlay:
@@ -166,7 +174,7 @@ class DScanAnalyzer:
         state = C.get('dscan_uistate', {})
         state['scale'] = self.ui_scale
         C.dscan_uistate = dict2attrdict(state)
-        C.write(['dscan_uistate'], 'config.state.yaml')
+        C.write(['dscan_uistate'], 'config.state.dscan.yaml')
     
     def _create_scaled_font(self, scale):
         if dpg.does_item_exist("font_registry"):
@@ -177,7 +185,6 @@ class DScanAnalyzer:
         dpg.bind_font(self.font)
     
     def _create_zoom_slider(self):
-        self.slider_h = None
         with dpg.group(tag="zoom_container", parent="main"):
             dpg.add_slider_float(
                 tag="zoom_slider",
@@ -188,11 +195,10 @@ class DScanAnalyzer:
                 format="",
                 callback=self._on_zoom_change
             )
-    
+
     def _on_zoom_change(self, sender, val):
         self.ui_scale = val
         dpg.set_global_font_scale(val)
-        self.slider_h = None
         self._save_ui_scale()
         self._auto_resize()
     
@@ -217,31 +223,13 @@ class DScanAnalyzer:
             dpg.set_viewport_width(w)
     
     def _update_zoom_slider_visibility(self):
+        # Zoom + transparency bars show only when not in overlay mode.
         if not dpg.does_item_exist("zoom_container"):
             return
-        
-        if dpg.does_item_exist("zoom_slider") and self.slider_h is None:
-            self.slider_h = dpg.get_item_rect_size("zoom_slider")[1]
-        
-        is_overlay = self.mgr.is_overlay_mode()
-        slider_exists = dpg.does_item_exist("zoom_slider")
-        spacer_exists = dpg.does_item_exist("zoom_spacer")
-        
-        if is_overlay and slider_exists and self.slider_h:
-            dpg.delete_item("zoom_slider")
-            dpg.add_spacer(tag="zoom_spacer", height=self.slider_h, parent="zoom_container")
-        elif not is_overlay and spacer_exists:
-            dpg.delete_item("zoom_spacer")
-            dpg.add_slider_float(
-                tag="zoom_slider",
-                default_value=self.ui_scale,
-                min_value=0.5,
-                max_value=2.0,
-                width=-1,
-                format="",
-                callback=self._on_zoom_change,
-                parent="zoom_container"
-            )
+        if self.mgr.is_overlay_mode():
+            dpg.hide_item("zoom_container")
+        else:
+            dpg.show_item("zoom_container")
 
     def get_elapsed_time(self):
         if not self.result_start_time:
@@ -276,8 +264,7 @@ class DScanAnalyzer:
             self._create_zoom_slider()
         
         self._setup_click_handler()
-        self._setup_aggr_hotkey()
-        
+
         dpg.set_primary_window("main", True)
         dpg.show_viewport()
         dpg.render_dearpygui_frame()
@@ -285,7 +272,6 @@ class DScanAnalyzer:
         dpg.set_global_font_scale(self.ui_scale)
         self.mgr.apply_saved_state()
         self._update_zoom_slider_visibility()
-        self.tray.start()
     
     def _setup_click_handler(self):
         with dpg.handler_registry(tag="global_click"):
@@ -723,16 +709,11 @@ class DScanAnalyzer:
     def run_loop(self):
         self._needs_resize = False
         while dpg.is_dearpygui_running():
+            self._apply_control()
             if self.quit_requested:
                 dpg.stop_dearpygui()
                 break
-            changed = self.mgr.process_hotkeys()
-            if self.process_aggr_hotkey():
-                changed = True
-            if changed:
-                # State was just applied on this thread; refresh the tray so its
-                # checkmarks reflect it (pystray bakes them in at menu build time).
-                self.tray.update_menu()
+            self.process_aggr_hotkey()
             self.mgr.check_and_save()
             if self.monitor_clipboard_enabled:
                 self.check_clipboard()
@@ -758,7 +739,6 @@ class DScanAnalyzer:
     def start(self):
         self.setup_gui()
         self.run_loop()
-        self.tray.stop()
         self.mgr.cleanup()
         self._shutdown_api()
         dpg.destroy_context()

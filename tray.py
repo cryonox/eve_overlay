@@ -1,18 +1,22 @@
-"""System tray icon: toggle overlay state and quit the app.
+"""System tray icon for the supervisor.
 
-The tray runs pystray on its own daemon thread. Toggle callbacks must not touch
-win32 / dearpygui state directly (that lives on the main thread) -- instead they
-set the same "requested" flags the hotkeys use, which the main loop processes.
+The menu is dynamic (module enable toggles + a variable list of tracked DPS
+chars), so it's rebuilt from a builder callback whenever state changes. pystray
+on Windows bakes the menu at build time, so refresh() reassigns icon.menu and
+calls update_menu(); the rebuild is lock-guarded since it runs from both the
+pystray thread (clicks) and the supervisor loop (status changes).
 """
+import ctypes
+from ctypes import wintypes
 import threading
 import pystray
 import pystray._win32 as _pystray_win32
+from pystray._util import win32
 from loguru import logger
 
 import icon as icon_art
 
-# pystray on Windows only opens the menu on right click; route left click
-# to the same handler so a single click shows the menu either way.
+# pystray on Windows only opens the menu on right click; route left click too.
 _WM_LBUTTONUP = 0x0202
 _WM_RBUTTONUP = 0x0205
 _orig_on_notify = _pystray_win32.Icon._on_notify
@@ -21,108 +25,65 @@ _orig_on_notify = _pystray_win32.Icon._on_notify
 def _on_notify_patched(self, wparam, lparam):
     if lparam == _WM_LBUTTONUP:
         lparam = _WM_RBUTTONUP
-    return _orig_on_notify(self, wparam, lparam)
+    if lparam != _WM_RBUTTONUP or not self._menu_handle:
+        return _orig_on_notify(self, wparam, lparam)
+    # Show the menu, and if an action asked to keep it open (opacity quick-clicks)
+    # re-show it at the SAME anchor so the items don't shift under the cursor.
+    point = wintypes.POINT()
+    win32.GetCursorPos(ctypes.byref(point))
+    px, py = point.x, point.y
+    while True:
+        self._eve_reopen = False
+        win32.SetForegroundWindow(self._hwnd)
+        hmenu, descriptors = self._menu_handle
+        index = win32.TrackPopupMenuEx(
+            hmenu,
+            win32.TPM_RIGHTALIGN | win32.TPM_BOTTOMALIGN | win32.TPM_RETURNCMD,
+            px, py, self._menu_hwnd, None)
+        if index > 0:
+            descriptors[index - 1](self)
+        if not getattr(self, '_eve_reopen', False):
+            break
 
 
 _pystray_win32.Icon._on_notify = _on_notify_patched
 
 
-def _make_icon():
-    return icon_art.make_image(64)
-
-
 class TrayManager:
-    def __init__(self, on_toggle_overlay=None, on_toggle_clickthrough=None,
-                 on_toggle_text_bg=None, on_toggle_corp_mode=None,
-                 on_toggle_monitor_clipboard=None, on_toggle_console_log=None,
-                 on_quit=None,
-                 is_overlay=None, is_clickthrough=None, is_text_bg=None,
-                 is_corp_mode=None, is_monitor_clipboard=None,
-                 is_console_log=None):
-        self.on_toggle_overlay = on_toggle_overlay
-        self.on_toggle_clickthrough = on_toggle_clickthrough
-        self.on_toggle_text_bg = on_toggle_text_bg
-        self.on_toggle_corp_mode = on_toggle_corp_mode
-        self.on_toggle_monitor_clipboard = on_toggle_monitor_clipboard
-        self.on_toggle_console_log = on_toggle_console_log
-        self.on_quit = on_quit
-        self.is_overlay = is_overlay or (lambda: False)
-        self.is_clickthrough = is_clickthrough or (lambda: False)
-        self.is_text_bg = is_text_bg or (lambda: False)
-        self.is_corp_mode = is_corp_mode or (lambda: False)
-        self.is_monitor_clipboard = is_monitor_clipboard or (lambda: True)
-        self.is_console_log = is_console_log or (lambda: False)
+    def __init__(self, menu_builder):
+        """menu_builder() -> pystray.Menu, called to (re)build the menu."""
+        self._build = menu_builder
         self._icon = None
         self._thread = None
-        # update_menu() rebuilds the native menu (DestroyMenu + recreate); it can
-        # be driven from both the pystray thread and the dpg main loop, so guard it.
-        self._menu_lock = threading.Lock()
-
-    def update_menu(self):
-        """Rebuild the tray menu so checkmarks reflect current state."""
-        with self._menu_lock:
-            if self._icon:
-                try:
-                    self._icon.update_menu()
-                except Exception:
-                    logger.exception("tray: update_menu failed")
-
-    def _wrap_toggle(self, cb):
-        def handler(icon, item):
-            if cb:
-                try:
-                    cb()
-                except Exception:
-                    logger.exception("tray: toggle handler failed")
-            self.update_menu()
-        return handler
+        self._lock = threading.Lock()
 
     def start(self):
-        def quit_app(icon, item):
-            icon.stop()
-            if self.on_quit:
-                self.on_quit()
-
         self._icon = pystray.Icon(
-            'eve_overlay',
-            _make_icon(),
-            'eve_overlay',
-            menu=pystray.Menu(
-                pystray.MenuItem(
-                    'Overlay', self._wrap_toggle(self.on_toggle_overlay),
-                    checked=lambda item: self.is_overlay(),
-                ),
-                pystray.MenuItem(
-                    'Click-through', self._wrap_toggle(self.on_toggle_clickthrough),
-                    checked=lambda item: self.is_clickthrough(),
-                ),
-                pystray.MenuItem(
-                    'Show background', self._wrap_toggle(self.on_toggle_text_bg),
-                    checked=lambda item: self.is_text_bg(),
-                ),
-                pystray.MenuItem(
-                    'Corp mode (aggregate)', self._wrap_toggle(self.on_toggle_corp_mode),
-                    checked=lambda item: self.is_corp_mode(),
-                ),
-                pystray.MenuItem(
-                    'Monitor clipboard', self._wrap_toggle(self.on_toggle_monitor_clipboard),
-                    checked=lambda item: self.is_monitor_clipboard(),
-                ),
-                pystray.MenuItem(
-                    'Show console log', self._wrap_toggle(self.on_toggle_console_log),
-                    checked=lambda item: self.is_console_log(),
-                ),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem('Exit', quit_app),
-            ),
+            'eve_overlay', icon_art.make_image(64), 'eve_overlay',
+            menu=self._build(),
         )
         self._thread = threading.Thread(target=self._icon.run, daemon=True)
         self._thread.start()
         logger.info("tray icon started")
+
+    def refresh(self):
+        with self._lock:
+            if not self._icon:
+                return
+            try:
+                self._icon.menu = self._build()
+                self._icon.update_menu()
+            except Exception:
+                logger.exception("tray: refresh failed")
+
+    def request_reopen(self):
+        """Ask the patched _on_notify to re-show the menu after this click."""
+        if self._icon is not None:
+            self._icon._eve_reopen = True
 
     def stop(self):
         if self._icon:
             try:
                 self._icon.stop()
             except Exception:
-                logger.exception("tray: stop failed")
+                pass

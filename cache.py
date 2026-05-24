@@ -393,23 +393,10 @@ if __name__ == "__main__":
     cache.build_cache()
     cache.load_cache()
 
-    info = cache.get_char_info("cryonox")
-    if info:
-        logger.info(f"Char ID: {info['char_id']}")
-        logger.info(f"Corp: {info['corp_name']} ({info['corp_id']})")
-        logger.info(
-            f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
-
-    info = cache.get_char_info("cryonox dps1")
-    if info:
-        logger.info(f"Char ID: {info['char_id']}")
-        logger.info(f"Corp: {info['corp_name']} ({info['corp_id']})")
-        logger.info(
-            f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
-
-    info = cache.get_char_info("cryonox bubbly")
-    if info:
-        logger.info(f"Char ID: {info['char_id']}")
-        logger.info(f"Corp: {info['corp_name']} ({info['corp_id']})")
-        logger.info(
-            f"Alliance: {info['alliance_name']} ({info['alliance_id']})")
+    for name in ("Some Pilot", "Another Pilot"):
+        info = cache.get_char_info(name)
+        if info:
+            logger.info(f"Char ID: {info['char_id']}")
+            logger.info(f"Corp: {info['corp_name']} ({info['corp_id']})")
+            logger.info(
+                f"Alliance: {info['alliance_name']} ({info['alliance_id']})")

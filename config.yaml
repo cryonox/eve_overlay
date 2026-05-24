@@ -45,3 +45,13 @@ dscan:
         color: [0, 255, 255]
         kills_min: 10
         danger_min: 20
+dps:
+  enabled: true
+  font: C:/Windows/Fonts/consolab.ttf
+  dps_window: 30
+  dps_alarm_thresh: 80
+  mining_alarm_thresh: 35
+  mining_alarm_interval: 30
+  ignore: []
+  transparency: 180
+  bg_color: [60, 60, 60]

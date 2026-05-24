@@ -11,12 +11,12 @@ _icon_path = os.path.abspath('icon.ico')
 icon_art.write_ico(_icon_path)
 print(f"[spec] wrote icon -> {_icon_path}")
 
-# pystray / PIL ship data files and submodules that need full collection so the
-# bundled exe can import them.
+# pystray / PIL / watchdog ship data files and submodules that need full
+# collection so the bundled exe can import them.
 _extra_datas = []
 _extra_binaries = []
 _extra_hidden = []
-for _mod in ('pystray', 'PIL'):
+for _mod in ('pystray', 'PIL', 'watchdog'):
     _d, _b, _h = collect_all(_mod)
     _extra_datas += _d
     _extra_binaries += _b
@@ -26,10 +26,18 @@ a = Analysis(
     ['eve_overlay.py'],
     pathex=[],
     binaries=_extra_binaries,
-    datas=_extra_datas,
+    datas=[
+        ('assets/alarm_dps.wav', 'assets'),
+        ('assets/alarm_mining.wav', 'assets'),
+    ] + _extra_datas,
     hiddenimports=[
         'pystray', 'pystray._win32',
         'PIL', 'PIL.Image', 'PIL.ImageDraw',
+        # window child modules are imported dynamically by the entry point
+        'dscan_analyzer', 'dps_meter', 'supervisor',
+        'watchdog', 'watchdog.observers', 'watchdog.observers.read_directory_changes',
+        # win32com is used to resolve the EVE logs dir (has a USERPROFILE fallback)
+        'win32com', 'win32com.client', 'win32timezone', 'pythoncom', 'pywintypes',
     ] + _extra_hidden,
     hookspath=[],
     hooksconfig={},
