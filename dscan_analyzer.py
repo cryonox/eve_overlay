@@ -10,6 +10,7 @@ from services import PilotService, DScanService, PilotState, PilotAPIClient
 from services.api.client import ServerConfig
 from services.dscan_service import get_dscan_info_url
 from pilot_color_classifier import PilotColorClassifier
+from tray import TrayManager
 from loguru import logger
 
 def bgr_to_rgb(color):
@@ -110,6 +111,22 @@ class DScanAnalyzer:
         self.alliance_colors = {}
         self.alliance_ids = {}
         self.corp_ids = {}
+
+        self.quit_requested = False
+        self.tray = TrayManager(
+            on_toggle_overlay=self.mgr._request_toggle_overlay,
+            on_toggle_clickthrough=self.mgr._request_toggle_clickthrough,
+            on_toggle_text_bg=self.mgr._request_toggle_text_bg,
+            on_toggle_corp_mode=self._request_aggr_toggle,
+            on_quit=self._request_quit,
+            is_overlay=lambda: self.mgr.overlay,
+            is_clickthrough=lambda: self.mgr.clickthrough,
+            is_text_bg=lambda: self.mgr.text_bg,
+            is_corp_mode=lambda: self.aggr_mode,
+        )
+
+    def _request_quit(self):
+        self.quit_requested = True
     
     def on_overlay_toggle(self):
         if self.mgr.overlay:
@@ -253,6 +270,7 @@ class DScanAnalyzer:
         dpg.set_global_font_scale(self.ui_scale)
         self.mgr.apply_saved_state()
         self._update_zoom_slider_visibility()
+        self.tray.start()
     
     def _setup_click_handler(self):
         with dpg.handler_registry(tag="global_click"):
@@ -678,6 +696,9 @@ class DScanAnalyzer:
     def run_loop(self):
         self._needs_resize = False
         while dpg.is_dearpygui_running():
+            if self.quit_requested:
+                dpg.stop_dearpygui()
+                break
             self.mgr.process_hotkeys()
             self.process_aggr_hotkey()
             self.mgr.check_and_save()
@@ -704,6 +725,7 @@ class DScanAnalyzer:
     def start(self):
         self.setup_gui()
         self.run_loop()
+        self.tray.stop()
         self.mgr.cleanup()
         self._shutdown_api()
         dpg.destroy_context()

@@ -150,8 +150,17 @@ def merge_dict(base, update):
 def configure_logger(cfg):
     from loguru import logger
     logger.remove()
+    if not cfg.get('logging', {}).get('enabled', True):
+        return
     level = cfg.logging.get('level', 'INFO').upper()
-    logger.add(sys.stderr, level=level)
+    # In a windowed (console=False) PyInstaller build sys.stderr is None;
+    # guard before adding so logger.add doesn't choke on a None sink.
+    if sys.stderr is not None:
+        logger.add(sys.stderr, level=level)
+    elif getattr(sys, 'frozen', False):
+        # No console to write to -- log to a file next to the exe instead.
+        log_file = Path(sys.executable).resolve().parent / 'eve_overlay.log'
+        logger.add(str(log_file), level=level, rotation='5 MB')
 
 
 def attrdict2dict(obj):
